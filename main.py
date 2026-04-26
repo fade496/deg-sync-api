@@ -874,11 +874,11 @@ from datetime import datetime, timedelta
 def sync_time_entries(x_api_key: str = Header(None)):
     check_key(x_api_key)
 
-    # Last 90 days by SPENT DATE, plus only entries updated in that same window
+    # Last 30 days by SPENT DATE, plus only entries updated in that same window
     today = datetime.utcnow().date()
-    from_date = (today - timedelta(days=90)).isoformat()
+    from_date = (today - timedelta(days=30)).isoformat()
     to_date = today.isoformat()
-    updated_since = (datetime.utcnow() - timedelta(days=90)).isoformat() + "Z"
+    updated_since = (datetime.utcnow() - timedelta(days=30)).isoformat() + "Z"
 
     entries = []
     page = 1
