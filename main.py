@@ -1126,20 +1126,20 @@ def sync_invoices(
     existing_invoice_map = {}
     for record in get_airtable_records("Invoices"):
         fields = record.get("fields", {})
-        hid = fields.get("Harvest Invoice ID")
+        harvest_invoice_id = fields.get("Harvest Invoice ID")
 
-        if hid is not None:
-            existing_invoice_map[str(hid)] = record["id"]
+        if harvest_invoice_id is not None:
+            existing_invoice_map[str(harvest_invoice_id)] = record["id"]
 
     created = 0
     updated = 0
     skipped_missing_client = 0
     failed = []
 
-    for inv in invoices:
-        invoice_id = inv.get("id")
+    for invoice in invoices:
+        invoice_id = invoice.get("id")
 
-        client_id = (inv.get("client") or {}).get("id")
+        client_id = (invoice.get("client") or {}).get("id")
         client_record_id = client_map.get(str(client_id))
 
         if not client_record_id:
@@ -1147,23 +1147,23 @@ def sync_invoices(
             continue
 
         fields = {
-            "Invoice Number": inv.get("number"),
+            "Invoice Number": invoice.get("number"),
             "Harvest Invoice ID": invoice_id,
             "Client": [client_record_id],
-            "Amount": inv.get("amount"),
-            "Due Amount": inv.get("due_amount"),
-            "Issue Date": inv.get("issue_date"),
-            "Due Date": inv.get("due_date"),
-            "State": inv.get("state"),
+            "Amount": invoice.get("amount"),
+            "Due Amount": invoice.get("due_amount"),
+            "Issue Date": invoice.get("issue_date"),
+            "Due Date": invoice.get("due_date"),
+            "State": invoice.get("state") or "",
         }
 
         try:
-            existing_id = existing_invoice_map.get(str(invoice_id))
+            existing_record_id = existing_invoice_map.get(str(invoice_id))
 
-            if existing_id:
+            if existing_record_id:
                 response = update_airtable_record(
                     "Invoices",
-                    existing_id,
+                    existing_record_id,
                     fields,
                 )
 
