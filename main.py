@@ -31,6 +31,130 @@ def airtable_headers():
     }
 
 
+def get_harvest_records(endpoint, key):
+    records = []
+    page = 1
+
+    while True:
+        url = f"https://api.harvestapp.com/v2/{endpoint}"
+        response = requests.get(
+            url,
+            headers=harvest_headers(),
+            params={"page": page, "per_page": 100},
+        )
+        response.raise_for_status()
+
+        data = response.json()
+        records.extend(data.get(key, []))
+
+        next_page = data.get("next_page")
+        if not next_page:
+            break
+
+        page = next_page
+
+    return records
+
+
+def get_airtable_records(table_name):
+    records = []
+    offset = None
+
+    while True:
+        url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_name}"
+        params = {}
+
+        if offset:
+            params["offset"] = offset
+
+        response = requests.get(url, headers=airtable_headers(), params=params)
+        response.raise_for_status()
+
+        data = response.json()
+        records.extend(data.get("records", []))
+
+        offset = data.get("offset")
+        if not offset:
+            break
+
+    return records
+
+
+def find_airtable_record(table_name, formula):
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_name}"
+
+    response = requests.get(
+        url,
+        headers=airtable_headers(),
+        params={"filterByFormula": formula},
+    )
+
+    response.raise_for_status()
+    records = response.json().get("records", [])
+
+    if records:
+        return records[0]
+
+    return None
+
+
+def create_airtable_record(table_name, fields):
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_name}"
+
+    return requests.post(
+        url,
+        headers=airtable_headers(),
+        json={"fields": fields},
+    )
+
+
+def update_airtable_record(table_name, record_id, fields):
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_name}/{record_id}"
+
+    return requests.patch(
+        url,
+        headers=airtable_headers(),
+        json={"fields": fields},
+    )
+
+
+def build_client_map():
+    airtable_clients = get_airtable_records("Clients")
+
+    client_map = {}
+
+    for record in airtable_clients:
+        fields = record.get("fields", {})
+        harvest_client_id = fields.get("Harvest Client ID")
+
+        if harvest_client_id is not None:
+            client_map[str(harvest_client_id)] = record["id"]
+
+    return client_map
+
+
+def map_project_billing_method(project):
+    if project.get("is_fixed_fee"):
+        return "Fixed fee"
+
+    if not project.get("is_billable"):
+        return "Non-billable"
+
+    bill_by = project.get("bill_by")
+
+    mapping = {
+        "Project": "Project hourly rate",
+        "Person": "Person hourly rate",
+        "People": "Person hourly rate",
+        "Task": "Task hourly rate",
+        "Tasks": "Task hourly rate",
+        "none": "Non-billable",
+        "None": "Non-billable",
+    }
+
+    return mapping.get(bill_by)
+
+
 @app.get("/")
 def root():
     return {"message": "DEG Sync API running"}
@@ -40,15 +164,12 @@ def root():
 def test_airtable(x_api_key: str = Header(None)):
     check_key(x_api_key)
 
-    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Clients"
-    r = requests.get(url, headers=airtable_headers())
-    body = r.json()
+    records = get_airtable_records("Clients")
 
     return {
-        "status_code": r.status_code,
-        "ok": r.ok,
-        "airtable_records_returned": len(body.get("records", [])),
-        "response": body,
+        "status_code": 200,
+        "ok": True,
+        "airtable_records_returned": len(records),
     }
 
 
@@ -56,12 +177,7 @@ def test_airtable(x_api_key: str = Header(None)):
 def sync_clients(x_api_key: str = Header(None)):
     check_key(x_api_key)
 
-    harvest_url = "https://api.harvestapp.com/v2/clients"
-    harvest_response = requests.get(harvest_url, headers=harvest_headers())
-    harvest_response.raise_for_status()
-
-    clients = harvest_response.json().get("clients", [])
-    airtable_url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Clients"
+    clients = get_harvest_records("clients", "clients")
 
     created = 0
     updated = 0
@@ -70,48 +186,47 @@ def sync_clients(x_api_key: str = Header(None)):
     for client in clients:
         harvest_id = client.get("id")
 
-        payload = {
-            "fields": {
-                "Name": client.get("name"),
-                "Harvest Client ID": harvest_id,
-                "Is Active": client.get("is_active"),
-                "Address": client.get("address") or "",
-                "Currency": client.get("currency") or "",
-            }
+        fields = {
+            "Name": client.get("name"),
+            "Harvest Client ID": harvest_id,
+            "Is Active": client.get("is_active"),
+            "Address": client.get("address") or "",
+            "Currency": client.get("currency") or "",
         }
 
         try:
-            search_url = f"{airtable_url}?filterByFormula={{Harvest Client ID}}={harvest_id}"
-            search_response = requests.get(search_url, headers=airtable_headers())
-            search_response.raise_for_status()
+            existing = find_airtable_record(
+                "Clients",
+                f"{{Harvest Client ID}}={harvest_id}",
+            )
 
-            records = search_response.json().get("records", [])
+            if existing:
+                response = update_airtable_record(
+                    "Clients",
+                    existing["id"],
+                    fields,
+                )
 
-            if records:
-                record_id = records[0]["id"]
-                update_url = f"{airtable_url}/{record_id}"
-                update_response = requests.patch(update_url, headers=airtable_headers(), json=payload)
-
-                if update_response.status_code in [200, 201]:
+                if response.status_code in [200, 201]:
                     updated += 1
                 else:
                     failed.append({
                         "client": client.get("name"),
                         "action": "update",
-                        "status_code": update_response.status_code,
-                        "response": update_response.text,
+                        "status_code": response.status_code,
+                        "response": response.text,
                     })
             else:
-                create_response = requests.post(airtable_url, headers=airtable_headers(), json=payload)
+                response = create_airtable_record("Clients", fields)
 
-                if create_response.status_code in [200, 201]:
+                if response.status_code in [200, 201]:
                     created += 1
                 else:
                     failed.append({
                         "client": client.get("name"),
                         "action": "create",
-                        "status_code": create_response.status_code,
-                        "response": create_response.text,
+                        "status_code": response.status_code,
+                        "response": response.text,
                     })
 
         except Exception as e:
@@ -134,31 +249,12 @@ def sync_clients(x_api_key: str = Header(None)):
 def sync_contacts(x_api_key: str = Header(None)):
     check_key(x_api_key)
 
-    harvest_url = "https://api.harvestapp.com/v2/contacts"
-    harvest_response = requests.get(harvest_url, headers=harvest_headers())
-    harvest_response.raise_for_status()
-
-    contacts = harvest_response.json().get("contacts", [])
-
-    clients_url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Clients"
-    clients_response = requests.get(clients_url, headers=airtable_headers())
-    clients_response.raise_for_status()
-
-    airtable_clients = clients_response.json().get("records", [])
-
-    client_map = {}
-    for record in airtable_clients:
-        fields = record.get("fields", {})
-        harvest_client_id = fields.get("Harvest Client ID")
-
-        if harvest_client_id is not None:
-            client_map[str(harvest_client_id)] = record["id"]
-
-    contacts_url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Contacts"
+    contacts = get_harvest_records("contacts", "contacts")
+    client_map = build_client_map()
 
     created = 0
     updated = 0
-    skipped = 0
+    skipped_missing_client = 0
     skipped_inactive = 0
     failed = []
 
@@ -174,7 +270,7 @@ def sync_contacts(x_api_key: str = Header(None)):
         linked_client_record_id = client_map.get(str(harvest_client_id))
 
         if not linked_client_record_id:
-            skipped += 1
+            skipped_missing_client += 1
             failed.append({
                 "contact": f"{contact.get('first_name', '')} {contact.get('last_name', '')}".strip(),
                 "reason": "No matching Airtable client found",
@@ -187,50 +283,49 @@ def sync_contacts(x_api_key: str = Header(None)):
         full_name = f"{first_name} {last_name}".strip()
         phone = contact.get("phone_office") or contact.get("phone_mobile") or ""
 
-        payload = {
-            "fields": {
-                "Full Name": full_name,
-                "First Name": first_name,
-                "Last Name": last_name,
-                "Email": contact.get("email") or "",
-                "Phone": phone,
-                "Client": [linked_client_record_id],
-                "Harvest Contact ID": str(harvest_contact_id),
-            }
+        fields = {
+            "Full Name": full_name,
+            "First Name": first_name,
+            "Last Name": last_name,
+            "Email": contact.get("email") or "",
+            "Phone": phone,
+            "Client": [linked_client_record_id],
+            "Harvest Contact ID": str(harvest_contact_id),
         }
 
         try:
-            search_url = f"{contacts_url}?filterByFormula={{Harvest Contact ID}}='{harvest_contact_id}'"
-            search_response = requests.get(search_url, headers=airtable_headers())
-            search_response.raise_for_status()
+            existing = find_airtable_record(
+                "Contacts",
+                f"{{Harvest Contact ID}}='{harvest_contact_id}'",
+            )
 
-            records = search_response.json().get("records", [])
+            if existing:
+                response = update_airtable_record(
+                    "Contacts",
+                    existing["id"],
+                    fields,
+                )
 
-            if records:
-                record_id = records[0]["id"]
-                update_url = f"{contacts_url}/{record_id}"
-                update_response = requests.patch(update_url, headers=airtable_headers(), json=payload)
-
-                if update_response.status_code in [200, 201]:
+                if response.status_code in [200, 201]:
                     updated += 1
                 else:
                     failed.append({
                         "contact": full_name,
                         "action": "update",
-                        "status_code": update_response.status_code,
-                        "response": update_response.text,
+                        "status_code": response.status_code,
+                        "response": response.text,
                     })
             else:
-                create_response = requests.post(contacts_url, headers=airtable_headers(), json=payload)
+                response = create_airtable_record("Contacts", fields)
 
-                if create_response.status_code in [200, 201]:
+                if response.status_code in [200, 201]:
                     created += 1
                 else:
                     failed.append({
                         "contact": full_name,
                         "action": "create",
-                        "status_code": create_response.status_code,
-                        "response": create_response.text,
+                        "status_code": response.status_code,
+                        "response": response.text,
                     })
 
         except Exception as e:
@@ -244,8 +339,108 @@ def sync_contacts(x_api_key: str = Header(None)):
         "harvest_contacts": len(contacts),
         "created": created,
         "updated": updated,
-        "skipped_missing_client": skipped,
+        "skipped_missing_client": skipped_missing_client,
         "skipped_inactive": skipped_inactive,
+        "failed": len(failed),
+        "failed_examples": failed[:5],
+    }
+
+
+@app.post("/sync/projects")
+def sync_projects(x_api_key: str = Header(None)):
+    check_key(x_api_key)
+
+    projects = get_harvest_records("projects", "projects")
+    client_map = build_client_map()
+
+    created = 0
+    updated = 0
+    skipped_missing_client = 0
+    failed = []
+
+    for project in projects:
+        harvest_project_id = project.get("id")
+        harvest_client = project.get("client") or {}
+        harvest_client_id = harvest_client.get("id")
+
+        linked_client_record_id = client_map.get(str(harvest_client_id))
+
+        if not linked_client_record_id:
+            skipped_missing_client += 1
+            failed.append({
+                "project": project.get("name"),
+                "reason": "No matching Airtable client found",
+                "harvest_client_id": harvest_client_id,
+            })
+            continue
+
+        fields = {
+            "Name": project.get("name"),
+            "Harvest Project ID": harvest_project_id,
+            "Client": [linked_client_record_id],
+            "Code": project.get("code") or "",
+            "Short Code": project.get("code") or "",
+            "Is Active": project.get("is_active"),
+            "Is Billable": project.get("is_billable"),
+            "Is Fixed Fee": project.get("is_fixed_fee"),
+            "Hourly Rate": project.get("hourly_rate"),
+            "Budget": project.get("budget"),
+            "Budget Is Monthly": project.get("budget_is_monthly"),
+            "Fee": project.get("fee"),
+            "Notes": project.get("notes") or "",
+        }
+
+        billing_method = map_project_billing_method(project)
+        if billing_method:
+            fields["Billing Method"] = billing_method
+
+        try:
+            existing = find_airtable_record(
+                "Projects",
+                f"{{Harvest Project ID}}={harvest_project_id}",
+            )
+
+            if existing:
+                response = update_airtable_record(
+                    "Projects",
+                    existing["id"],
+                    fields,
+                )
+
+                if response.status_code in [200, 201]:
+                    updated += 1
+                else:
+                    failed.append({
+                        "project": project.get("name"),
+                        "action": "update",
+                        "status_code": response.status_code,
+                        "response": response.text,
+                    })
+            else:
+                response = create_airtable_record("Projects", fields)
+
+                if response.status_code in [200, 201]:
+                    created += 1
+                else:
+                    failed.append({
+                        "project": project.get("name"),
+                        "action": "create",
+                        "status_code": response.status_code,
+                        "response": response.text,
+                    })
+
+        except Exception as e:
+            failed.append({
+                "project": project.get("name"),
+                "action": "exception",
+                "response": str(e),
+            })
+
+    return {
+        "harvest_projects": len(projects),
+        "created": created,
+        "updated": updated,
+        "skipped_missing_client": skipped_missing_client,
         "failed": len(failed),
         "failed_examples": failed[:5],
     }
