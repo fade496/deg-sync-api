@@ -555,6 +555,37 @@ def status(
         "checks": checks,
     }
 
+@app.post("/query")
+def query(
+    payload: QueryRequest,
+    x_api_key: str = Header(None),
+    authorization: str = Header(None),
+):
+    check_key(x_api_key=x_api_key, authorization=authorization)
+
+    records = get_airtable_records(payload.table)
+
+    results = []
+
+    for record in records:
+        fields = record.get("fields", {})
+
+        if payload.search:
+            if payload.search.lower() not in str(fields).lower():
+                continue
+
+        results.append({
+            "id": record["id"],
+            "fields": fields
+        })
+
+        if len(results) >= payload.limit:
+            break
+
+    return {
+        "count": len(results),
+        "results": results
+    }
 
 @app.get("/test/airtable")
 def test_airtable(
@@ -1523,6 +1554,23 @@ def sync_invoices(
 
     return result
 
+# ============================================================
+# Query + Update Models
+# ============================================================
+
+class QueryRequest(BaseModel):
+    table: str
+    search: Optional[str] = None
+    limit: int = 10
+
+
+class UpdateRequest(BaseModel):
+    entity: str  # person, client, project, task
+    harvest_id: int
+    field: str
+    operation: str = "set"  # set, increment
+    value: Optional[float] = None
+    amount: Optional[float] = None
 
 # ============================================================
 # Create endpoints
@@ -1999,4 +2047,70 @@ def create_project(
         "harvest_client": harvest_client,
         "harvest_project": created_project,
         "sync_result": sync_result,
+    }
+
+@app.post("/update")
+def update(
+    payload: UpdateRequest,
+    x_api_key: str = Header(None),
+    authorization: str = Header(None),
+):
+    check_key(x_api_key=x_api_key, authorization=authorization)
+
+    # Step 1: get current value from Harvest
+    endpoint_map = {
+        "person": "users",
+        "client": "clients",
+        "project": "projects",
+        "task": "tasks",
+    }
+
+    endpoint = endpoint_map.get(payload.entity)
+
+    if not endpoint:
+        raise HTTPException(status_code=400, detail="Invalid entity")
+
+    url = f"https://api.harvestapp.com/v2/{endpoint}/{payload.harvest_id}"
+
+    response = requests.get(url, headers=harvest_headers())
+    response.raise_for_status()
+
+    current_data = response.json()
+    old_value = current_data.get(payload.field)
+
+    # Step 2: calculate new value
+    if payload.operation == "increment":
+        if payload.amount is None:
+            raise HTTPException(status_code=400, detail="Missing amount")
+        new_value = float(old_value or 0) + payload.amount
+    else:
+        new_value = payload.value
+
+    # Step 3: update Harvest
+    update_response = requests.patch(
+        url,
+        headers=harvest_headers(),
+        json={payload.field: new_value},
+    )
+
+    if update_response.status_code not in [200, 201]:
+        raise HTTPException(
+            status_code=update_response.status_code,
+            detail=update_response.text,
+        )
+
+    # Step 4: sync back to Airtable
+    if payload.entity == "person":
+        sync_people(x_api_key=x_api_key, authorization=authorization)
+    elif payload.entity == "client":
+        sync_clients(x_api_key=x_api_key, authorization=authorization)
+    elif payload.entity == "project":
+        sync_projects(x_api_key=x_api_key, authorization=authorization)
+    elif payload.entity == "task":
+        sync_tasks(x_api_key=x_api_key, authorization=authorization)
+
+    return {
+        "status": "updated",
+        "old_value": old_value,
+        "new_value": new_value
     }
