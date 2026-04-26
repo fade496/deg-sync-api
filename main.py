@@ -1728,3 +1728,47 @@ def create_project(
         "harvest_project": created_project,
         "sync_result": sync_result,
     }
+
+@app.get("/status")
+def status(x_api_key: str = Header(None)):
+    check_key(x_api_key)
+
+    checks = {
+        "api": True,
+        "harvest_token_set": bool(HARVEST_TOKEN),
+        "harvest_account_id_set": bool(HARVEST_ACCOUNT_ID),
+        "airtable_token_set": bool(AIRTABLE_TOKEN),
+        "airtable_base_id_set": bool(AIRTABLE_BASE_ID),
+    }
+
+    harvest_ok = False
+    airtable_ok = False
+
+    try:
+        response = requests.get(
+            "https://api.harvestapp.com/v2/users/me",
+            headers=harvest_headers(),
+        )
+        harvest_ok = response.status_code == 200
+    except Exception:
+        harvest_ok = False
+
+    try:
+        response = requests.get(
+            f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Clients",
+            headers=airtable_headers(),
+            params={"pageSize": 1},
+        )
+        airtable_ok = response.status_code == 200
+    except Exception:
+        airtable_ok = False
+
+    checks["harvest_connection_ok"] = harvest_ok
+    checks["airtable_connection_ok"] = airtable_ok
+
+    overall_status = "ok" if all(checks.values()) else "warning"
+
+    return {
+        "status": overall_status,
+        "checks": checks,
+    }
