@@ -1,3 +1,4 @@
+```python
 import os
 import requests
 from fastapi import FastAPI, Header, HTTPException
@@ -119,10 +120,9 @@ def update_airtable_record(table_name, record_id, fields):
 
 
 def build_client_map():
-    airtable_clients = get_airtable_records("Clients")
     client_map = {}
 
-    for record in airtable_clients:
+    for record in get_airtable_records("Clients"):
         fields = record.get("fields", {})
         harvest_client_id = fields.get("Harvest Client ID")
 
@@ -130,6 +130,32 @@ def build_client_map():
             client_map[str(harvest_client_id)] = record["id"]
 
     return client_map
+
+
+def build_project_map():
+    project_map = {}
+
+    for record in get_airtable_records("Projects"):
+        fields = record.get("fields", {})
+        harvest_project_id = fields.get("Harvest Project ID")
+
+        if harvest_project_id is not None:
+            project_map[str(harvest_project_id)] = record["id"]
+
+    return project_map
+
+
+def build_people_map():
+    people_map = {}
+
+    for record in get_airtable_records("People"):
+        fields = record.get("fields", {})
+        harvest_user_id = fields.get("Harvest User ID")
+
+        if harvest_user_id is not None:
+            people_map[str(harvest_user_id)] = record["id"]
+
+    return people_map
 
 
 def map_project_billing_method(project):
@@ -200,11 +226,7 @@ def sync_clients(x_api_key: str = Header(None)):
             )
 
             if existing:
-                response = update_airtable_record(
-                    "Clients",
-                    existing["id"],
-                    fields,
-                )
+                response = update_airtable_record("Clients", existing["id"], fields)
 
                 if response.status_code in [200, 201]:
                     updated += 1
@@ -307,11 +329,7 @@ def sync_contacts(x_api_key: str = Header(None)):
             )
 
             if existing:
-                response = update_airtable_record(
-                    "Contacts",
-                    existing["id"],
-                    fields,
-                )
+                response = update_airtable_record("Contacts", existing["id"], fields)
 
                 if response.status_code in [200, 201]:
                     updated += 1
@@ -416,11 +434,7 @@ def sync_projects(x_api_key: str = Header(None)):
             )
 
             if existing:
-                response = update_airtable_record(
-                    "Projects",
-                    existing["id"],
-                    fields,
-                )
+                response = update_airtable_record("Projects", existing["id"], fields)
 
                 if response.status_code in [200, 201]:
                     updated += 1
@@ -509,11 +523,7 @@ def sync_people(x_api_key: str = Header(None)):
             )
 
             if existing:
-                response = update_airtable_record(
-                    "People",
-                    existing["id"],
-                    fields,
-                )
+                response = update_airtable_record("People", existing["id"], fields)
 
                 if response.status_code in [200, 201]:
                     updated += 1
@@ -558,3 +568,112 @@ def sync_people(x_api_key: str = Header(None)):
         "failed": len(failed),
         "failed_examples": failed[:5],
     }
+
+
+@app.post("/sync/project-people")
+def sync_project_people(x_api_key: str = Header(None)):
+    check_key(x_api_key)
+
+    assignments = get_harvest_records("user_assignments", "user_assignments")
+
+    project_map = build_project_map()
+    people_map = build_people_map()
+
+    created = 0
+    updated = 0
+    skipped_missing_links = 0
+    failed = []
+
+    for assignment in assignments:
+        assignment_id = assignment.get("id")
+
+        harvest_project_id = (assignment.get("project") or {}).get("id")
+        harvest_user_id = (assignment.get("user") or {}).get("id")
+
+        project_record_id = project_map.get(str(harvest_project_id))
+        person_record_id = people_map.get(str(harvest_user_id))
+
+        if not project_record_id or not person_record_id:
+            skipped_missing_links += 1
+            failed.append(
+                {
+                    "assignment": assignment_id,
+                    "reason": "Missing linked Project or Person",
+                    "harvest_project_id": harvest_project_id,
+                    "harvest_user_id": harvest_user_id,
+                }
+            )
+            continue
+
+        user_name = (assignment.get("user") or {}).get("name") or ""
+        project_name = (assignment.get("project") or {}).get("name") or ""
+        name = f"{user_name} - {project_name}".strip(" -")
+
+        fields = {
+            "Name": name,
+            "Project": [project_record_id],
+            "Person": [person_record_id],
+            "Harvest Assignment ID": assignment_id,
+            "Is Active": assignment.get("is_active"),
+            "Is Project Manager": assignment.get("is_project_manager"),
+            "Use Default Rates": assignment.get("use_default_rates"),
+            "Hourly Rate": assignment.get("hourly_rate"),
+        }
+
+        try:
+            existing = find_airtable_record(
+                "Project People",
+                f"{{Harvest Assignment ID}}={assignment_id}",
+            )
+
+            if existing:
+                response = update_airtable_record(
+                    "Project People",
+                    existing["id"],
+                    fields,
+                )
+
+                if response.status_code in [200, 201]:
+                    updated += 1
+                else:
+                    failed.append(
+                        {
+                            "assignment": assignment_id,
+                            "action": "update",
+                            "status_code": response.status_code,
+                            "response": response.text,
+                        }
+                    )
+            else:
+                response = create_airtable_record("Project People", fields)
+
+                if response.status_code in [200, 201]:
+                    created += 1
+                else:
+                    failed.append(
+                        {
+                            "assignment": assignment_id,
+                            "action": "create",
+                            "status_code": response.status_code,
+                            "response": response.text,
+                        }
+                    )
+
+        except Exception as e:
+            failed.append(
+                {
+                    "assignment": assignment_id,
+                    "action": "exception",
+                    "response": str(e),
+                }
+            )
+
+    return {
+        "harvest_assignments": len(assignments),
+        "created": created,
+        "updated": updated,
+        "skipped_missing_links": skipped_missing_links,
+        "failed": len(failed),
+        "failed_examples": failed[:5],
+    }
+```
