@@ -163,7 +163,7 @@ def sync_contacts(x_api_key: str = Header(None)):
     failed = []
 
     for contact in contacts:
-        if not contact.get("is_active"):
+        if contact.get("is_active") is False:
             skipped_inactive += 1
             continue
 
