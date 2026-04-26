@@ -1527,3 +1527,75 @@ def create_client_with_contact(
         "clients_sync_result": clients_sync_result,
         "contacts_sync_result": contacts_sync_result,
     }
+
+class CreatePersonRequest(BaseModel):
+    first_name: str
+    last_name: str
+    email: str
+    telephone: Optional[str] = ""
+    is_contractor: bool = False
+    is_active: bool = True
+    default_hourly_rate: Optional[float] = None
+    cost_rate: Optional[float] = None
+
+
+@app.post("/create/person")
+def create_person(
+    payload: CreatePersonRequest,
+    x_api_key: str = Header(None),
+):
+    check_key(x_api_key)
+
+    # 1. Duplicate check in Harvest users by email
+    existing_users = get_harvest_records("users", "users")
+    incoming_email = payload.email.strip().lower()
+
+    for user in existing_users:
+        user_email = (user.get("email") or "").strip().lower()
+
+        if user_email == incoming_email:
+            return {
+                "status": "duplicate_found",
+                "message": "Person already exists in Harvest by email. No new user was created.",
+                "harvest_user": user,
+            }
+
+    # 2. Create user in Harvest
+    harvest_payload = {
+        "first_name": payload.first_name,
+        "last_name": payload.last_name,
+        "email": payload.email,
+        "telephone": payload.telephone or "",
+        "is_contractor": payload.is_contractor,
+        "is_active": payload.is_active,
+    }
+
+    if payload.default_hourly_rate is not None:
+        harvest_payload["default_hourly_rate"] = payload.default_hourly_rate
+
+    if payload.cost_rate is not None:
+        harvest_payload["cost_rate"] = payload.cost_rate
+
+    response = requests.post(
+        "https://api.harvestapp.com/v2/users",
+        headers=harvest_headers(),
+        json=harvest_payload,
+    )
+
+    if response.status_code not in [200, 201]:
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=response.text,
+        )
+
+    created_user = response.json()
+
+    # 3. Sync Harvest users back into Airtable
+    sync_result = sync_people(x_api_key=x_api_key)
+
+    return {
+        "status": "created",
+        "message": "Person created in Harvest and synced to Airtable.",
+        "harvest_user": created_user,
+        "sync_result": sync_result,
+    }
