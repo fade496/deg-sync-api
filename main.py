@@ -868,17 +868,16 @@ def sync_project_tasks(x_api_key: str = Header(None)):
     }
 
 from datetime import datetime, timedelta
+from fastapi import Query
 
 
 @app.post("/sync/time-entries")
-def sync_time_entries(x_api_key: str = Header(None)):
+def sync_time_entries(
+    x_api_key: str = Header(None),
+    from_date: str = Query(..., description="Start date in YYYY-MM-DD format"),
+    to_date: str = Query(..., description="End date in YYYY-MM-DD format"),
+):
     check_key(x_api_key)
-
-    # Last 30 days by SPENT DATE, plus only entries updated in that same window
-    today = datetime.utcnow().date()
-    from_date = (today - timedelta(days=30)).isoformat()
-    to_date = today.isoformat()
-    updated_since = (datetime.utcnow() - timedelta(days=30)).isoformat() + "Z"
 
     entries = []
     page = 1
@@ -890,7 +889,6 @@ def sync_time_entries(x_api_key: str = Header(None)):
             params={
                 "from": from_date,
                 "to": to_date,
-                "updated_since": updated_since,
                 "page": page,
                 "per_page": 100,
             },
@@ -906,7 +904,6 @@ def sync_time_entries(x_api_key: str = Header(None)):
 
         page = data.get("next_page")
 
-    # Preload maps once
     project_map = build_project_map()
     people_map = build_people_map()
 
@@ -1023,7 +1020,6 @@ def sync_time_entries(x_api_key: str = Header(None)):
     return {
         "from_date": from_date,
         "to_date": to_date,
-        "updated_since": updated_since,
         "harvest_time_entries": len(entries),
         "created": created,
         "updated": updated,
