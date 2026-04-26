@@ -1599,3 +1599,132 @@ def create_person(
         "harvest_user": created_user,
         "sync_result": sync_result,
     }
+
+class CreateProjectRequest(BaseModel):
+    client_name: Optional[str] = None
+    harvest_client_id: Optional[int] = None
+
+    name: str
+    code: Optional[str] = ""
+    is_active: bool = True
+    is_billable: bool = True
+    is_fixed_fee: bool = False
+
+    # Harvest accepts bill_by values such as Project, People, Task, or none depending on setup.
+    bill_by: Optional[str] = "Project"
+
+    hourly_rate: Optional[float] = None
+    budget: Optional[float] = None
+    budget_by: Optional[str] = None
+    budget_is_monthly: bool = False
+    fee: Optional[float] = None
+    notes: Optional[str] = ""
+
+
+@app.post("/create/project")
+def create_project(
+    payload: CreateProjectRequest,
+    x_api_key: str = Header(None),
+):
+    check_key(x_api_key)
+
+    if not payload.harvest_client_id and not payload.client_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide either harvest_client_id or client_name.",
+        )
+
+    # 1. Resolve Harvest client
+    harvest_client = None
+    clients = get_harvest_records("clients", "clients")
+
+    if payload.harvest_client_id:
+        for client in clients:
+            if client.get("id") == payload.harvest_client_id:
+                harvest_client = client
+                break
+    else:
+        for client in clients:
+            if (client.get("name") or "").strip().lower() == payload.client_name.strip().lower():
+                harvest_client = client
+                break
+
+    if not harvest_client:
+        raise HTTPException(
+            status_code=404,
+            detail="Matching Harvest client not found. Create the client first.",
+        )
+
+    harvest_client_id = harvest_client.get("id")
+
+    # 2. Duplicate check in Harvest projects by client + project name/code
+    existing_projects = get_harvest_records("projects", "projects")
+
+    incoming_name = payload.name.strip().lower()
+    incoming_code = (payload.code or "").strip().lower()
+
+    for project in existing_projects:
+        project_client_id = (project.get("client") or {}).get("id")
+        project_name = (project.get("name") or "").strip().lower()
+        project_code = (project.get("code") or "").strip().lower()
+
+        same_client = project_client_id == harvest_client_id
+        same_name = project_name == incoming_name
+        same_code = incoming_code and project_code == incoming_code
+
+        if same_client and (same_name or same_code):
+            return {
+                "status": "duplicate_found",
+                "message": "Project already exists in Harvest for this client. No new project was created.",
+                "harvest_project": project,
+            }
+
+    # 3. Create project in Harvest
+    harvest_payload = {
+        "client_id": harvest_client_id,
+        "name": payload.name,
+        "code": payload.code or "",
+        "is_active": payload.is_active,
+        "is_billable": payload.is_billable,
+        "is_fixed_fee": payload.is_fixed_fee,
+        "bill_by": payload.bill_by,
+        "budget_is_monthly": payload.budget_is_monthly,
+        "notes": payload.notes or "",
+    }
+
+    if payload.hourly_rate is not None:
+        harvest_payload["hourly_rate"] = payload.hourly_rate
+
+    if payload.budget is not None:
+        harvest_payload["budget"] = payload.budget
+
+    if payload.budget_by:
+        harvest_payload["budget_by"] = payload.budget_by
+
+    if payload.fee is not None:
+        harvest_payload["fee"] = payload.fee
+
+    response = requests.post(
+        "https://api.harvestapp.com/v2/projects",
+        headers=harvest_headers(),
+        json=harvest_payload,
+    )
+
+    if response.status_code not in [200, 201]:
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=response.text,
+        )
+
+    created_project = response.json()
+
+    # 4. Sync Harvest projects back into Airtable
+    sync_result = sync_projects(x_api_key=x_api_key)
+
+    return {
+        "status": "created",
+        "message": "Project created in Harvest and synced to Airtable.",
+        "harvest_client": harvest_client,
+        "harvest_project": created_project,
+        "sync_result": sync_result,
+    }
