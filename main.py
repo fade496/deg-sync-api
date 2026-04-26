@@ -1235,3 +1235,64 @@ def sync_invoices(
     )
 
     return result
+
+from pydantic import BaseModel
+from typing import Optional
+
+
+class CreateClientRequest(BaseModel):
+    name: str
+    currency: str = "CAD"
+    address: Optional[str] = ""
+    is_active: bool = True
+
+
+@app.post("/create/client")
+def create_client(
+    payload: CreateClientRequest,
+    x_api_key: str = Header(None),
+):
+    check_key(x_api_key)
+
+    # 1. Basic duplicate check in Harvest by client name
+    existing_clients = get_harvest_records("clients", "clients")
+
+    for client in existing_clients:
+        if (client.get("name") or "").strip().lower() == payload.name.strip().lower():
+            return {
+                "status": "duplicate_found",
+                "message": "Client already exists in Harvest. No new client was created.",
+                "harvest_client": client,
+            }
+
+    # 2. Create client in Harvest
+    harvest_payload = {
+        "name": payload.name,
+        "currency": payload.currency,
+        "address": payload.address or "",
+        "is_active": payload.is_active,
+    }
+
+    response = requests.post(
+        "https://api.harvestapp.com/v2/clients",
+        headers=harvest_headers(),
+        json=harvest_payload,
+    )
+
+    if response.status_code not in [200, 201]:
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=response.text,
+        )
+
+    created_client = response.json()
+
+    # 3. Sync Harvest clients back into Airtable
+    sync_result = sync_clients(x_api_key=x_api_key)
+
+    return {
+        "status": "created",
+        "message": "Client created in Harvest and synced to Airtable.",
+        "harvest_client": created_client,
+        "sync_result": sync_result,
+    }
