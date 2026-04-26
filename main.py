@@ -102,12 +102,14 @@ def sync_clients(x_api_key: str = Header(None)):
                 if update_response.status_code in [200, 201]:
                     updated += 1
                 else:
-                    failed.append({
-                        "client": client.get("name"),
-                        "action": "update",
-                        "status_code": update_response.status_code,
-                        "response": update_response.text,
-                    })
+                    failed.append(
+                        {
+                            "client": client.get("name"),
+                            "action": "update",
+                            "status_code": update_response.status_code,
+                            "response": update_response.text,
+                        }
+                    )
 
             else:
                 create_response = requests.post(
@@ -119,19 +121,23 @@ def sync_clients(x_api_key: str = Header(None)):
                 if create_response.status_code in [200, 201]:
                     created += 1
                 else:
-                    failed.append({
-                        "client": client.get("name"),
-                        "action": "create",
-                        "status_code": create_response.status_code,
-                        "response": create_response.text,
-                    })
+                    failed.append(
+                        {
+                            "client": client.get("name"),
+                            "action": "create",
+                            "status_code": create_response.status_code,
+                            "response": create_response.text,
+                        }
+                    )
 
         except Exception as e:
-            failed.append({
-                "client": client.get("name"),
-                "action": "exception",
-                "response": str(e),
-            })
+            failed.append(
+                {
+                    "client": client.get("name"),
+                    "action": "exception",
+                    "response": str(e),
+                }
+            )
 
     return {
         "harvest_clients": len(clients),
@@ -185,11 +191,13 @@ def sync_contacts(x_api_key: str = Header(None)):
 
         if not linked_client_record_id:
             skipped += 1
-            failed.append({
-                "contact": f"{contact.get('first_name', '')} {contact.get('last_name', '')}".strip(),
-                "reason": "No matching Airtable client found",
-                "harvest_client_id": harvest_client_id,
-            })
+            failed.append(
+                {
+                    "contact": f"{contact.get('first_name', '')} {contact.get('last_name', '')}".strip(),
+                    "reason": "No matching Airtable client found",
+                    "harvest_client_id": harvest_client_id,
+                }
+            )
             continue
 
         first_name = contact.get("first_name") or ""
@@ -206,12 +214,12 @@ def sync_contacts(x_api_key: str = Header(None)):
                 "Email": contact.get("email") or "",
                 "Phone": phone,
                 "Client": [linked_client_record_id],
-                "Harvest Contact ID": harvest_contact_id,
+                "Harvest Contact ID": str(harvest_contact_id),
             }
         }
 
         try:
-            search_url = f"{contacts_url}?filterByFormula={{Harvest Contact ID}}={harvest_contact_id}"
+            search_url = f"{contacts_url}?filterByFormula={{Harvest Contact ID}}='{harvest_contact_id}'"
             search_response = requests.get(search_url, headers=airtable_headers())
             search_response.raise_for_status()
 
@@ -230,12 +238,14 @@ def sync_contacts(x_api_key: str = Header(None)):
                 if update_response.status_code in [200, 201]:
                     updated += 1
                 else:
-                    failed.append({
-                        "contact": full_name,
-                        "action": "update",
-                        "status_code": update_response.status_code,
-                        "response": update_response.text,
-                    })
+                    failed.append(
+                        {
+                            "contact": full_name,
+                            "action": "update",
+                            "status_code": update_response.status_code,
+                            "response": update_response.text,
+                        }
+                    )
 
             else:
                 create_response = requests.post(
@@ -247,19 +257,23 @@ def sync_contacts(x_api_key: str = Header(None)):
                 if create_response.status_code in [200, 201]:
                     created += 1
                 else:
-                    failed.append({
-                        "contact": full_name,
-                        "action": "create",
-                        "status_code": create_response.status_code,
-                        "response": create_response.text,
-                    })
+                    failed.append(
+                        {
+                            "contact": full_name,
+                            "action": "create",
+                            "status_code": create_response.status_code,
+                            "response": create_response.text,
+                        }
+                    )
 
         except Exception as e:
-            failed.append({
-                "contact": full_name,
-                "action": "exception",
-                "response": str(e),
-            })
+            failed.append(
+                {
+                    "contact": full_name,
+                    "action": "exception",
+                    "response": str(e),
+                }
+            )
 
     return {
         "harvest_contacts": len(contacts),
