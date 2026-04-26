@@ -21,51 +21,84 @@ def root():
     return {"message": "DEG Sync API running"}
 
 
+@app.get("/test/airtable")
+def test_airtable(x_api_key: str = Header(None)):
+    check_key(x_api_key)
+
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Clients"
+    headers = {"Authorization": f"Bearer {AIRTABLE_TOKEN}"}
+
+    r = requests.get(url, headers=headers)
+
+    try:
+        body = r.json()
+    except Exception:
+        body = {"raw_response": r.text}
+
+    return {
+        "status_code": r.status_code,
+        "ok": r.ok,
+        "airtable_records_returned": len(body.get("records", [])) if isinstance(body, dict) else None,
+        "response": body,
+    }
+
+
 @app.post("/sync/clients")
 def sync_clients(x_api_key: str = Header(None)):
     check_key(x_api_key)
 
-    # -----------------------
-    # 1. GET FROM HARVEST
-    # -----------------------
     harvest_url = "https://api.harvestapp.com/v2/clients"
-
     harvest_headers = {
         "Authorization": f"Bearer {HARVEST_TOKEN}",
         "Harvest-Account-ID": HARVEST_ACCOUNT_ID,
-        "User-Agent": "DEG Sync API"
+        "User-Agent": "DEG Sync API",
     }
 
-    r = requests.get(harvest_url, headers=harvest_headers)
-    data = r.json()
-    clients = data.get("clients", [])
+    harvest_response = requests.get(harvest_url, headers=harvest_headers)
+    harvest_response.raise_for_status()
 
-    # -----------------------
-    # 2. SEND TO AIRTABLE
-    # -----------------------
+    clients = harvest_response.json().get("clients", [])
+
     airtable_url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Clients"
-
     airtable_headers = {
         "Authorization": f"Bearer {AIRTABLE_TOKEN}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
 
     created = 0
+    failed = []
 
     for client in clients:
         payload = {
             "fields": {
                 "Name": client.get("name"),
-                "Harvest ID": str(client.get("id"))
+                "Harvest Client ID": client.get("id"),
+                "Is Active": client.get("is_active"),
+                "Address": client.get("address") or "",
+                "Currency": client.get("currency") or "",
             }
         }
 
-        res = requests.post(airtable_url, headers=airtable_headers, json=payload)
+        response = requests.post(
+            airtable_url,
+            headers=airtable_headers,
+            json=payload,
+        )
 
-        if res.status_code == 200:
+        if response.status_code in [200, 201]:
             created += 1
+        else:
+            failed.append(
+                {
+                    "client": client.get("name"),
+                    "status_code": response.status_code,
+                    "response": response.text,
+                }
+            )
 
     return {
         "harvest_clients": len(clients),
-        "created_in_airtable": created
+        "created_in_airtable": created,
+        "failed": len(failed),
+        "failed_examples": failed[:3],
     }
