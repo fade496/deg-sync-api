@@ -866,3 +866,136 @@ def sync_project_tasks(x_api_key: str = Header(None)):
         "failed": len(failed),
         "failed_examples": failed[:5],
     }
+
+from datetime import datetime, timedelta
+
+
+@app.post("/sync/time-entries")
+def sync_time_entries(x_api_key: str = Header(None)):
+    check_key(x_api_key)
+
+    # 🔥 last 3 months window
+    updated_since = (datetime.utcnow() - timedelta(days=90)).isoformat()
+
+    entries = []
+    page = 1
+
+    while True:
+        response = requests.get(
+            "https://api.harvestapp.com/v2/time_entries",
+            headers=harvest_headers(),
+            params={
+                "updated_since": updated_since,
+                "page": page,
+                "per_page": 100,
+            },
+        )
+
+        response.raise_for_status()
+        data = response.json()
+
+        entries.extend(data.get("time_entries", []))
+
+        if not data.get("next_page"):
+            break
+
+        page = data.get("next_page")
+
+    project_map = build_project_map()
+    task_map = {}
+    people_map = build_people_map()
+
+    # Build task map
+    for record in get_airtable_records("Tasks"):
+        fields = record.get("fields", {})
+        hid = fields.get("Harvest Task ID")
+        if hid is not None:
+            task_map[str(hid)] = record["id"]
+
+    created = 0
+    updated = 0
+    skipped_missing_links = 0
+    failed = []
+
+    for entry in entries:
+        entry_id = entry.get("id")
+
+        project_id = (entry.get("project") or {}).get("id")
+        task_id = (entry.get("task") or {}).get("id")
+        user_id = (entry.get("user") or {}).get("id")
+
+        project_record = project_map.get(str(project_id))
+        task_record = task_map.get(str(task_id))
+        person_record = people_map.get(str(user_id))
+
+        if not project_record or not task_record or not person_record:
+            skipped_missing_links += 1
+            continue
+
+        spent_date = entry.get("spent_date")
+
+        name = f"{spent_date} - {entry.get('hours')}h"
+
+        fields = {
+            "Name": name,
+            "Harvest Time Entry ID": entry_id,
+            "Project": [project_record],
+            "Task": [task_record],
+            "Person": [person_record],
+            "Hours": entry.get("hours"),
+            "Notes": entry.get("notes") or "",
+            "Billable": entry.get("billable"),
+            "Approved": entry.get("is_approved"),
+            "Spent Date": spent_date,
+        }
+
+        try:
+            existing = find_airtable_record(
+                "Time Entries",
+                f"{{Harvest Time Entry ID}}={entry_id}",
+            )
+
+            if existing:
+                response = update_airtable_record(
+                    "Time Entries",
+                    existing["id"],
+                    fields,
+                )
+
+                if response.status_code in [200, 201]:
+                    updated += 1
+                else:
+                    failed.append({
+                        "entry": entry_id,
+                        "action": "update",
+                        "status_code": response.status_code,
+                        "response": response.text,
+                    })
+            else:
+                response = create_airtable_record("Time Entries", fields)
+
+                if response.status_code in [200, 201]:
+                    created += 1
+                else:
+                    failed.append({
+                        "entry": entry_id,
+                        "action": "create",
+                        "status_code": response.status_code,
+                        "response": response.text,
+                    })
+
+        except Exception as e:
+            failed.append({
+                "entry": entry_id,
+                "action": "exception",
+                "response": str(e),
+            })
+
+    return {
+        "harvest_time_entries": len(entries),
+        "created": created,
+        "updated": updated,
+        "skipped_missing_links": skipped_missing_links,
+        "failed": len(failed),
+        "failed_examples": failed[:5],
+    }
