@@ -1083,6 +1083,7 @@ def sync_time_entries(
     )
 
     return result
+
 from fastapi import Query
 
 
@@ -1093,6 +1094,7 @@ def sync_invoices(
     to_date: str = Query(...),
 ):
     check_key(x_api_key)
+    started_at = utc_now_iso()
 
     invoices = []
     page = 1
@@ -1119,10 +1121,8 @@ def sync_invoices(
 
         page = data.get("next_page")
 
-    # Build client map
     client_map = build_client_map()
 
-    # Existing invoice map
     existing_invoice_map = {}
     for record in get_airtable_records("Invoices"):
         fields = record.get("fields", {})
@@ -1170,12 +1170,14 @@ def sync_invoices(
                 if response.status_code in [200, 201]:
                     updated += 1
                 else:
-                    failed.append({
-                        "invoice": invoice_id,
-                        "action": "update",
-                        "status_code": response.status_code,
-                        "response": response.text,
-                    })
+                    failed.append(
+                        {
+                            "invoice": invoice_id,
+                            "action": "update",
+                            "status_code": response.status_code,
+                            "response": response.text,
+                        }
+                    )
 
             else:
                 response = create_airtable_record("Invoices", fields)
@@ -1185,25 +1187,32 @@ def sync_invoices(
 
                     try:
                         existing_invoice_map[str(invoice_id)] = response.json()["id"]
-                    except:
+                    except Exception:
                         pass
 
                 else:
-                    failed.append({
-                        "invoice": invoice_id,
-                        "action": "create",
-                        "status_code": response.status_code,
-                        "response": response.text,
-                    })
+                    failed.append(
+                        {
+                            "invoice": invoice_id,
+                            "action": "create",
+                            "status_code": response.status_code,
+                            "response": response.text,
+                        }
+                    )
 
         except Exception as e:
-            failed.append({
-                "invoice": invoice_id,
-                "action": "exception",
-                "response": str(e),
-            })
+            failed.append(
+                {
+                    "invoice": invoice_id,
+                    "action": "exception",
+                    "response": str(e),
+                }
+            )
 
-    return {
+    skipped = skipped_missing_client
+    status = "success" if len(failed) == 0 else "partial"
+
+    result = {
         "from_date": from_date,
         "to_date": to_date,
         "harvest_invoices": len(invoices),
@@ -1213,3 +1222,16 @@ def sync_invoices(
         "failed": len(failed),
         "failed_examples": failed[:5],
     }
+
+    write_sync_log(
+        sync_type="invoices",
+        started_at=started_at,
+        status=status,
+        created=created,
+        updated=updated,
+        skipped=skipped,
+        failed=len(failed),
+        details=result,
+    )
+
+    return result
