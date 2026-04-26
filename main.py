@@ -25,46 +25,47 @@ def root():
 def sync_clients(x_api_key: str = Header(None)):
     check_key(x_api_key)
 
-    url = "https://api.harvestapp.com/v2/clients"
+    # -----------------------
+    # 1. GET FROM HARVEST
+    # -----------------------
+    harvest_url = "https://api.harvestapp.com/v2/clients"
 
-    headers = {
+    harvest_headers = {
         "Authorization": f"Bearer {HARVEST_TOKEN}",
         "Harvest-Account-ID": HARVEST_ACCOUNT_ID,
         "User-Agent": "DEG Sync API"
     }
 
-    r = requests.get(url, headers=headers)
+    r = requests.get(harvest_url, headers=harvest_headers)
     data = r.json()
+    clients = data.get("clients", [])
 
-    return {"count": len(data.get("clients", []))}
+    # -----------------------
+    # 2. SEND TO AIRTABLE
+    # -----------------------
+    airtable_url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Clients"
 
-
-@app.get("/test/airtable")
-def test_airtable(x_api_key: str = Header(None)):
-    check_key(x_api_key)
-
-    if not AIRTABLE_TOKEN:
-        raise HTTPException(status_code=500, detail="AIRTABLE_TOKEN is not set")
-
-    if not AIRTABLE_BASE_ID:
-        raise HTTPException(status_code=500, detail="AIRTABLE_BASE_ID is not set")
-
-    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Clients"
-
-    headers = {
-        "Authorization": f"Bearer {AIRTABLE_TOKEN}"
+    airtable_headers = {
+        "Authorization": f"Bearer {AIRTABLE_TOKEN}",
+        "Content-Type": "application/json"
     }
 
-    r = requests.get(url, headers=headers)
+    created = 0
 
-    try:
-        body = r.json()
-    except Exception:
-        body = {"raw_response": r.text}
+    for client in clients:
+        payload = {
+            "fields": {
+                "Name": client.get("name"),
+                "Harvest ID": str(client.get("id"))
+            }
+        }
+
+        res = requests.post(airtable_url, headers=airtable_headers, json=payload)
+
+        if res.status_code == 200:
+            created += 1
 
     return {
-        "status_code": r.status_code,
-        "ok": r.ok,
-        "airtable_records_returned": len(body.get("records", [])) if isinstance(body, dict) else None,
-        "response": body
+        "harvest_clients": len(clients),
+        "created_in_airtable": created
     }
