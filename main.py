@@ -1,4 +1,3 @@
-```python
 import os
 import requests
 from fastapi import FastAPI, Header, HTTPException
@@ -676,4 +675,3 @@ def sync_project_people(x_api_key: str = Header(None)):
         "failed": len(failed),
         "failed_examples": failed[:5],
     }
-```
