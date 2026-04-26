@@ -120,7 +120,6 @@ def update_airtable_record(table_name, record_id, fields):
 
 def build_client_map():
     airtable_clients = get_airtable_records("Clients")
-
     client_map = {}
 
     for record in airtable_clients:
@@ -210,31 +209,37 @@ def sync_clients(x_api_key: str = Header(None)):
                 if response.status_code in [200, 201]:
                     updated += 1
                 else:
-                    failed.append({
-                        "client": client.get("name"),
-                        "action": "update",
-                        "status_code": response.status_code,
-                        "response": response.text,
-                    })
+                    failed.append(
+                        {
+                            "client": client.get("name"),
+                            "action": "update",
+                            "status_code": response.status_code,
+                            "response": response.text,
+                        }
+                    )
             else:
                 response = create_airtable_record("Clients", fields)
 
                 if response.status_code in [200, 201]:
                     created += 1
                 else:
-                    failed.append({
-                        "client": client.get("name"),
-                        "action": "create",
-                        "status_code": response.status_code,
-                        "response": response.text,
-                    })
+                    failed.append(
+                        {
+                            "client": client.get("name"),
+                            "action": "create",
+                            "status_code": response.status_code,
+                            "response": response.text,
+                        }
+                    )
 
         except Exception as e:
-            failed.append({
-                "client": client.get("name"),
-                "action": "exception",
-                "response": str(e),
-            })
+            failed.append(
+                {
+                    "client": client.get("name"),
+                    "action": "exception",
+                    "response": str(e),
+                }
+            )
 
     return {
         "harvest_clients": len(clients),
@@ -271,11 +276,13 @@ def sync_contacts(x_api_key: str = Header(None)):
 
         if not linked_client_record_id:
             skipped_missing_client += 1
-            failed.append({
-                "contact": f"{contact.get('first_name', '')} {contact.get('last_name', '')}".strip(),
-                "reason": "No matching Airtable client found",
-                "harvest_client_id": harvest_client_id,
-            })
+            failed.append(
+                {
+                    "contact": f"{contact.get('first_name', '')} {contact.get('last_name', '')}".strip(),
+                    "reason": "No matching Airtable client found",
+                    "harvest_client_id": harvest_client_id,
+                }
+            )
             continue
 
         first_name = contact.get("first_name") or ""
@@ -309,31 +316,37 @@ def sync_contacts(x_api_key: str = Header(None)):
                 if response.status_code in [200, 201]:
                     updated += 1
                 else:
-                    failed.append({
-                        "contact": full_name,
-                        "action": "update",
-                        "status_code": response.status_code,
-                        "response": response.text,
-                    })
+                    failed.append(
+                        {
+                            "contact": full_name,
+                            "action": "update",
+                            "status_code": response.status_code,
+                            "response": response.text,
+                        }
+                    )
             else:
                 response = create_airtable_record("Contacts", fields)
 
                 if response.status_code in [200, 201]:
                     created += 1
                 else:
-                    failed.append({
-                        "contact": full_name,
-                        "action": "create",
-                        "status_code": response.status_code,
-                        "response": response.text,
-                    })
+                    failed.append(
+                        {
+                            "contact": full_name,
+                            "action": "create",
+                            "status_code": response.status_code,
+                            "response": response.text,
+                        }
+                    )
 
         except Exception as e:
-            failed.append({
-                "contact": full_name,
-                "action": "exception",
-                "response": str(e),
-            })
+            failed.append(
+                {
+                    "contact": full_name,
+                    "action": "exception",
+                    "response": str(e),
+                }
+            )
 
     return {
         "harvest_contacts": len(contacts),
@@ -367,11 +380,13 @@ def sync_projects(x_api_key: str = Header(None)):
 
         if not linked_client_record_id:
             skipped_missing_client += 1
-            failed.append({
-                "project": project.get("name"),
-                "reason": "No matching Airtable client found",
-                "harvest_client_id": harvest_client_id,
-            })
+            failed.append(
+                {
+                    "project": project.get("name"),
+                    "reason": "No matching Airtable client found",
+                    "harvest_client_id": harvest_client_id,
+                }
+            )
             continue
 
         fields = {
@@ -410,37 +425,136 @@ def sync_projects(x_api_key: str = Header(None)):
                 if response.status_code in [200, 201]:
                     updated += 1
                 else:
-                    failed.append({
-                        "project": project.get("name"),
-                        "action": "update",
-                        "status_code": response.status_code,
-                        "response": response.text,
-                    })
+                    failed.append(
+                        {
+                            "project": project.get("name"),
+                            "action": "update",
+                            "status_code": response.status_code,
+                            "response": response.text,
+                        }
+                    )
             else:
                 response = create_airtable_record("Projects", fields)
 
                 if response.status_code in [200, 201]:
                     created += 1
                 else:
-                    failed.append({
-                        "project": project.get("name"),
-                        "action": "create",
-                        "status_code": response.status_code,
-                        "response": response.text,
-                    })
+                    failed.append(
+                        {
+                            "project": project.get("name"),
+                            "action": "create",
+                            "status_code": response.status_code,
+                            "response": response.text,
+                        }
+                    )
 
         except Exception as e:
-            failed.append({
-                "project": project.get("name"),
-                "action": "exception",
-                "response": str(e),
-            })
+            failed.append(
+                {
+                    "project": project.get("name"),
+                    "action": "exception",
+                    "response": str(e),
+                }
+            )
 
     return {
         "harvest_projects": len(projects),
         "created": created,
         "updated": updated,
         "skipped_missing_client": skipped_missing_client,
+        "failed": len(failed),
+        "failed_examples": failed[:5],
+    }
+
+
+@app.post("/sync/people")
+def sync_people(x_api_key: str = Header(None)):
+    check_key(x_api_key)
+
+    users = get_harvest_records("users", "users")
+
+    created = 0
+    updated = 0
+    skipped_inactive = 0
+    failed = []
+
+    for user in users:
+        harvest_user_id = user.get("id")
+
+        if user.get("is_active") is False:
+            skipped_inactive += 1
+            continue
+
+        first_name = user.get("first_name") or ""
+        last_name = user.get("last_name") or ""
+        full_name = f"{first_name} {last_name}".strip()
+
+        fields = {
+            "Full Name": full_name,
+            "First Name": first_name,
+            "Last Name": last_name,
+            "Email": user.get("email") or "",
+            "Telephone": user.get("telephone") or "",
+            "Harvest User ID": harvest_user_id,
+            "Is Active": user.get("is_active"),
+            "Is Contractor": user.get("is_contractor"),
+            "Default Hourly Rate": user.get("default_hourly_rate"),
+            "Cost Rate": user.get("cost_rate"),
+        }
+
+        try:
+            existing = find_airtable_record(
+                "People",
+                f"{{Harvest User ID}}={harvest_user_id}",
+            )
+
+            if existing:
+                response = update_airtable_record(
+                    "People",
+                    existing["id"],
+                    fields,
+                )
+
+                if response.status_code in [200, 201]:
+                    updated += 1
+                else:
+                    failed.append(
+                        {
+                            "user": full_name,
+                            "action": "update",
+                            "status_code": response.status_code,
+                            "response": response.text,
+                        }
+                    )
+            else:
+                response = create_airtable_record("People", fields)
+
+                if response.status_code in [200, 201]:
+                    created += 1
+                else:
+                    failed.append(
+                        {
+                            "user": full_name,
+                            "action": "create",
+                            "status_code": response.status_code,
+                            "response": response.text,
+                        }
+                    )
+
+        except Exception as e:
+            failed.append(
+                {
+                    "user": full_name,
+                    "action": "exception",
+                    "response": str(e),
+                }
+            )
+
+    return {
+        "harvest_users": len(users),
+        "created": created,
+        "updated": updated,
+        "skipped_inactive": skipped_inactive,
         "failed": len(failed),
         "failed_examples": failed[:5],
     }
