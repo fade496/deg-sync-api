@@ -874,7 +874,10 @@ from datetime import datetime, timedelta
 def sync_time_entries(x_api_key: str = Header(None)):
     check_key(x_api_key)
 
-    # Pull entries changed in the last 90 days
+    # Last 90 days by SPENT DATE, plus only entries updated in that same window
+    today = datetime.utcnow().date()
+    from_date = (today - timedelta(days=90)).isoformat()
+    to_date = today.isoformat()
     updated_since = (datetime.utcnow() - timedelta(days=90)).isoformat() + "Z"
 
     entries = []
@@ -885,6 +888,8 @@ def sync_time_entries(x_api_key: str = Header(None)):
             "https://api.harvestapp.com/v2/time_entries",
             headers=harvest_headers(),
             params={
+                "from": from_date,
+                "to": to_date,
                 "updated_since": updated_since,
                 "page": page,
                 "per_page": 100,
@@ -901,7 +906,7 @@ def sync_time_entries(x_api_key: str = Header(None)):
 
         page = data.get("next_page")
 
-    # Preload Airtable maps once
+    # Preload maps once
     project_map = build_project_map()
     people_map = build_people_map()
 
@@ -990,10 +995,12 @@ def sync_time_entries(x_api_key: str = Header(None)):
 
                 if response.status_code in [200, 201]:
                     created += 1
+
                     try:
                         existing_time_entry_map[str(entry_id)] = response.json()["id"]
                     except Exception:
                         pass
+
                 else:
                     failed.append(
                         {
@@ -1014,6 +1021,8 @@ def sync_time_entries(x_api_key: str = Header(None)):
             )
 
     return {
+        "from_date": from_date,
+        "to_date": to_date,
         "updated_since": updated_since,
         "harvest_time_entries": len(entries),
         "created": created,
