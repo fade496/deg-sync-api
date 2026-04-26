@@ -1027,3 +1027,134 @@ def sync_time_entries(
         "failed": len(failed),
         "failed_examples": failed[:5],
     }
+
+from fastapi import Query
+
+
+@app.post("/sync/invoices")
+def sync_invoices(
+    x_api_key: str = Header(None),
+    from_date: str = Query(...),
+    to_date: str = Query(...),
+):
+    check_key(x_api_key)
+
+    invoices = []
+    page = 1
+
+    while True:
+        response = requests.get(
+            "https://api.harvestapp.com/v2/invoices",
+            headers=harvest_headers(),
+            params={
+                "from": from_date,
+                "to": to_date,
+                "page": page,
+                "per_page": 100,
+            },
+        )
+
+        response.raise_for_status()
+        data = response.json()
+
+        invoices.extend(data.get("invoices", []))
+
+        if not data.get("next_page"):
+            break
+
+        page = data.get("next_page")
+
+    # Build client map
+    client_map = build_client_map()
+
+    # Existing invoice map
+    existing_invoice_map = {}
+    for record in get_airtable_records("Invoices"):
+        fields = record.get("fields", {})
+        hid = fields.get("Harvest Invoice ID")
+
+        if hid is not None:
+            existing_invoice_map[str(hid)] = record["id"]
+
+    created = 0
+    updated = 0
+    skipped_missing_client = 0
+    failed = []
+
+    for inv in invoices:
+        invoice_id = inv.get("id")
+
+        client_id = (inv.get("client") or {}).get("id")
+        client_record_id = client_map.get(str(client_id))
+
+        if not client_record_id:
+            skipped_missing_client += 1
+            continue
+
+        fields = {
+            "Invoice Number": inv.get("number"),
+            "Harvest Invoice ID": invoice_id,
+            "Client": [client_record_id],
+            "Amount": inv.get("amount"),
+            "Due Amount": inv.get("due_amount"),
+            "Issue Date": inv.get("issue_date"),
+            "Due Date": inv.get("due_date"),
+            "State": inv.get("state"),
+        }
+
+        try:
+            existing_id = existing_invoice_map.get(str(invoice_id))
+
+            if existing_id:
+                response = update_airtable_record(
+                    "Invoices",
+                    existing_id,
+                    fields,
+                )
+
+                if response.status_code in [200, 201]:
+                    updated += 1
+                else:
+                    failed.append({
+                        "invoice": invoice_id,
+                        "action": "update",
+                        "status_code": response.status_code,
+                        "response": response.text,
+                    })
+
+            else:
+                response = create_airtable_record("Invoices", fields)
+
+                if response.status_code in [200, 201]:
+                    created += 1
+
+                    try:
+                        existing_invoice_map[str(invoice_id)] = response.json()["id"]
+                    except:
+                        pass
+
+                else:
+                    failed.append({
+                        "invoice": invoice_id,
+                        "action": "create",
+                        "status_code": response.status_code,
+                        "response": response.text,
+                    })
+
+        except Exception as e:
+            failed.append({
+                "invoice": invoice_id,
+                "action": "exception",
+                "response": str(e),
+            })
+
+    return {
+        "from_date": from_date,
+        "to_date": to_date,
+        "harvest_invoices": len(invoices),
+        "created": created,
+        "updated": updated,
+        "skipped_missing_client": skipped_missing_client,
+        "failed": len(failed),
+        "failed_examples": failed[:5],
+    }
