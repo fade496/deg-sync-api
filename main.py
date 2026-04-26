@@ -1,6 +1,10 @@
 import os
 import json
 import requests
+from urllib.parse import urlencode, parse_qs
+
+from fastapi import Request
+from fastapi.responses import RedirectResponse, JSONResponse
 
 from datetime import datetime, timezone
 from typing import Optional
@@ -20,6 +24,7 @@ AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 
 MS_TENANT_ID = os.getenv("MS_TENANT_ID")
 MS_CLIENT_ID = os.getenv("MS_CLIENT_ID")
+MS_CLIENT_SECRET = os.getenv("MS_CLIENT_SECRET")
 MS_ALLOWED_GROUP_ID = os.getenv("MS_ALLOWED_GROUP_ID")
 
 
@@ -338,6 +343,151 @@ def map_project_billing_method(project):
     }
 
     return mapping.get(bill_by)
+
+
+
+
+# ============================================================
+# OAuth proxy endpoints for ChatGPT Actions
+# ============================================================
+
+@app.get("/oauth/authorize")
+def oauth_authorize(
+    response_type: str = Query("code"),
+    client_id: Optional[str] = Query(None),
+    redirect_uri: str = Query(...),
+    scope: Optional[str] = Query(None),
+    state: Optional[str] = Query(None),
+):
+    """
+    ChatGPT calls this endpoint first.
+
+    This endpoint redirects the browser to Microsoft Entra.
+    Microsoft redirects back to ChatGPT's callback URL with the code.
+    """
+
+    if response_type != "code":
+        raise HTTPException(
+            status_code=400,
+            detail="Only authorization code flow is supported.",
+        )
+
+    if not MS_TENANT_ID:
+        raise HTTPException(status_code=500, detail="MS_TENANT_ID is not set")
+
+    azure_client_id = MS_CLIENT_ID or client_id
+
+    if not azure_client_id:
+        raise HTTPException(status_code=500, detail="MS_CLIENT_ID is not set")
+
+    # Use the requested ChatGPT scope if provided; otherwise default to the exposed API scope.
+    requested_scope = scope or f"api://{azure_client_id}/access_as_admin"
+
+    params = {
+        "client_id": azure_client_id,
+        "response_type": "code",
+        "redirect_uri": redirect_uri,
+        "response_mode": "query",
+        "scope": requested_scope,
+    }
+
+    if state:
+        params["state"] = state
+
+    microsoft_auth_url = (
+        f"https://login.microsoftonline.com/{MS_TENANT_ID}/oauth2/v2.0/authorize"
+        f"?{urlencode(params)}"
+    )
+
+    return RedirectResponse(microsoft_auth_url)
+
+
+@app.post("/oauth/token")
+async def oauth_token(request: Request):
+    """
+    ChatGPT calls this endpoint after Microsoft returns an authorization code.
+
+    This endpoint exchanges the code with Microsoft and returns the token payload
+    in the format ChatGPT Actions expects.
+    """
+
+    body = await request.body()
+    form = parse_qs(body.decode())
+
+    def first(name, default=None):
+        values = form.get(name)
+        if not values:
+            return default
+        return values[0]
+
+    code = first("code")
+    redirect_uri = first("redirect_uri")
+    grant_type = first("grant_type", "authorization_code")
+
+    incoming_client_id = first("client_id")
+    incoming_client_secret = first("client_secret")
+
+    azure_client_id = MS_CLIENT_ID or incoming_client_id
+    azure_client_secret = MS_CLIENT_SECRET or incoming_client_secret
+
+    if grant_type != "authorization_code":
+        raise HTTPException(
+            status_code=400,
+            detail="Only authorization_code grant_type is supported.",
+        )
+
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing authorization code")
+
+    if not redirect_uri:
+        raise HTTPException(status_code=400, detail="Missing redirect_uri")
+
+    if not MS_TENANT_ID:
+        raise HTTPException(status_code=500, detail="MS_TENANT_ID is not set")
+
+    if not azure_client_id:
+        raise HTTPException(status_code=500, detail="MS_CLIENT_ID is not set")
+
+    if not azure_client_secret:
+        raise HTTPException(status_code=500, detail="MS_CLIENT_SECRET is not set")
+
+    token_url = f"https://login.microsoftonline.com/{MS_TENANT_ID}/oauth2/v2.0/token"
+
+    data = {
+        "client_id": azure_client_id,
+        "client_secret": azure_client_secret,
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+    }
+
+    token_response = requests.post(
+        token_url,
+        data=data,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+
+    if token_response.status_code not in [200, 201]:
+        raise HTTPException(
+            status_code=token_response.status_code,
+            detail=token_response.text,
+        )
+
+    token_data = token_response.json()
+
+    result = {
+        "access_token": token_data.get("access_token"),
+        "token_type": token_data.get("token_type", "Bearer"),
+        "expires_in": token_data.get("expires_in", 3600),
+    }
+
+    if token_data.get("refresh_token"):
+        result["refresh_token"] = token_data["refresh_token"]
+
+    if token_data.get("id_token"):
+        result["id_token"] = token_data["id_token"]
+
+    return JSONResponse(result)
 
 
 # ============================================================
