@@ -906,6 +906,7 @@ def sync_project_tasks(x_api_key: str = Header(None)):
     }
 
 from datetime import datetime, timedelta, timezone
+
 from fastapi import Query
 
 
@@ -916,6 +917,7 @@ def sync_time_entries(
     to_date: str = Query(..., description="End date in YYYY-MM-DD format"),
 ):
     check_key(x_api_key)
+    started_at = utc_now_iso()
 
     entries = []
     page = 1
@@ -1055,7 +1057,10 @@ def sync_time_entries(
                 }
             )
 
-    return {
+    skipped = skipped_missing_links
+    status = "success" if len(failed) == 0 else "partial"
+
+    result = {
         "from_date": from_date,
         "to_date": to_date,
         "harvest_time_entries": len(entries),
@@ -1066,6 +1071,18 @@ def sync_time_entries(
         "failed_examples": failed[:5],
     }
 
+    write_sync_log(
+        sync_type="time-entries",
+        started_at=started_at,
+        status=status,
+        created=created,
+        updated=updated,
+        skipped=skipped,
+        failed=len(failed),
+        details=result,
+    )
+
+    return result
 from fastapi import Query
 
 
