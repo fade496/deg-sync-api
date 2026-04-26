@@ -693,3 +693,70 @@ def sync_project_people(x_api_key: str = Header(None)):
         "failed": len(failed),
         "failed_examples": failed[:5],
     }
+
+@app.post("/sync/tasks")
+def sync_tasks(x_api_key: str = Header(None)):
+    check_key(x_api_key)
+
+    tasks = get_harvest_records("tasks", "tasks")
+
+    created = 0
+    updated = 0
+    failed = []
+
+    for task in tasks:
+        harvest_task_id = task.get("id")
+
+        fields = {
+            "Name": task.get("name"),
+            "Harvest Task ID": harvest_task_id,
+            "Is Active": task.get("is_active"),
+            "Billable By Default": task.get("billable_by_default"),
+            "Default Hourly Rate": task.get("default_hourly_rate"),
+        }
+
+        try:
+            existing = find_airtable_record(
+                "Tasks",
+                f"{{Harvest Task ID}}={harvest_task_id}",
+            )
+
+            if existing:
+                response = update_airtable_record("Tasks", existing["id"], fields)
+
+                if response.status_code in [200, 201]:
+                    updated += 1
+                else:
+                    failed.append({
+                        "task": task.get("name"),
+                        "action": "update",
+                        "status_code": response.status_code,
+                        "response": response.text,
+                    })
+            else:
+                response = create_airtable_record("Tasks", fields)
+
+                if response.status_code in [200, 201]:
+                    created += 1
+                else:
+                    failed.append({
+                        "task": task.get("name"),
+                        "action": "create",
+                        "status_code": response.status_code,
+                        "response": response.text,
+                    })
+
+        except Exception as e:
+            failed.append({
+                "task": task.get("name"),
+                "action": "exception",
+                "response": str(e),
+            })
+
+    return {
+        "harvest_tasks": len(tasks),
+        "created": created,
+        "updated": updated,
+        "failed": len(failed),
+        "failed_examples": failed[:5],
+    }
