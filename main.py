@@ -1404,4 +1404,126 @@ def create_contact(
         "harvest_contact": created_contact,
         "sync_result": sync_result,
     }
-    
+
+class CreateClientWithContactRequest(BaseModel):
+    client_name: str
+    currency: str = "CAD"
+    address: Optional[str] = ""
+    is_active: bool = True
+
+    contact_first_name: str
+    contact_last_name: str
+    contact_email: Optional[str] = ""
+    contact_phone: Optional[str] = ""
+    contact_title: Optional[str] = ""
+
+
+@app.post("/create/client-with-contact")
+def create_client_with_contact(
+    payload: CreateClientWithContactRequest,
+    x_api_key: str = Header(None),
+):
+    check_key(x_api_key)
+
+    # 1. Check whether client already exists in Harvest
+    clients = get_harvest_records("clients", "clients")
+    harvest_client = None
+    client_created = False
+
+    for client in clients:
+        if (client.get("name") or "").strip().lower() == payload.client_name.strip().lower():
+            harvest_client = client
+            break
+
+    # 2. Create client in Harvest if missing
+    if not harvest_client:
+        harvest_client_payload = {
+            "name": payload.client_name,
+            "currency": payload.currency,
+            "address": payload.address or "",
+            "is_active": payload.is_active,
+        }
+
+        client_response = requests.post(
+            "https://api.harvestapp.com/v2/clients",
+            headers=harvest_headers(),
+            json=harvest_client_payload,
+        )
+
+        if client_response.status_code not in [200, 201]:
+            raise HTTPException(
+                status_code=client_response.status_code,
+                detail=client_response.text,
+            )
+
+        harvest_client = client_response.json()
+        client_created = True
+
+    harvest_client_id = harvest_client.get("id")
+
+    # 3. Check whether contact already exists in Harvest
+    contacts = get_harvest_records("contacts", "contacts")
+    harvest_contact = None
+    contact_created = False
+
+    incoming_email = (payload.contact_email or "").strip().lower()
+
+    for contact in contacts:
+        contact_email = (contact.get("email") or "").strip().lower()
+
+        if incoming_email and contact_email == incoming_email:
+            harvest_contact = contact
+            break
+
+        same_client = (contact.get("client") or {}).get("id") == harvest_client_id
+        same_name = (
+            (contact.get("first_name") or "").strip().lower()
+            == payload.contact_first_name.strip().lower()
+            and (contact.get("last_name") or "").strip().lower()
+            == payload.contact_last_name.strip().lower()
+        )
+
+        if same_client and same_name:
+            harvest_contact = contact
+            break
+
+    # 4. Create contact in Harvest if missing
+    if not harvest_contact:
+        harvest_contact_payload = {
+            "client_id": harvest_client_id,
+            "first_name": payload.contact_first_name,
+            "last_name": payload.contact_last_name,
+            "email": payload.contact_email or "",
+            "phone_office": payload.contact_phone or "",
+            "title": payload.contact_title or "",
+        }
+
+        contact_response = requests.post(
+            "https://api.harvestapp.com/v2/contacts",
+            headers=harvest_headers(),
+            json=harvest_contact_payload,
+        )
+
+        if contact_response.status_code not in [200, 201]:
+            raise HTTPException(
+                status_code=contact_response.status_code,
+                detail=contact_response.text,
+            )
+
+        harvest_contact = contact_response.json()
+        contact_created = True
+
+    # 5. Sync Harvest back into Airtable
+    clients_sync_result = sync_clients(x_api_key=x_api_key)
+    contacts_sync_result = sync_contacts(x_api_key=x_api_key)
+
+    return {
+        "status": "completed",
+        "message": "Client/contact workflow completed through Harvest and synced to Airtable.",
+        "client_created": client_created,
+        "contact_created": contact_created,
+        "harvest_client": harvest_client,
+        "harvest_contact": harvest_contact,
+        "clients_sync_result": clients_sync_result,
+        "contacts_sync_result": contacts_sync_result,
+    }
