@@ -2,7 +2,7 @@ import os
 import json
 import requests
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import FastAPI, Header, HTTPException, Query
@@ -18,11 +18,102 @@ HARVEST_ACCOUNT_ID = os.getenv("HARVEST_ACCOUNT_ID")
 AIRTABLE_TOKEN = os.getenv("AIRTABLE_TOKEN")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 
+MS_TENANT_ID = os.getenv("MS_TENANT_ID")
+MS_CLIENT_ID = os.getenv("MS_CLIENT_ID")
+MS_ALLOWED_GROUP_ID = os.getenv("MS_ALLOWED_GROUP_ID")
 
-def check_key(x_api_key):
-    if x_api_key != API_KEY:
-        raise HTTPException(status_code=401, detail="Invalid API key")
 
+# ============================================================
+# Authentication
+# ============================================================
+
+def microsoft_openid_config():
+    url = f"https://login.microsoftonline.com/{MS_TENANT_ID}/v2.0/.well-known/openid-configuration"
+    response = requests.get(url)
+    response.raise_for_status()
+    return response.json()
+
+
+def microsoft_jwks():
+    config = microsoft_openid_config()
+    jwks_uri = config["jwks_uri"]
+
+    response = requests.get(jwks_uri)
+    response.raise_for_status()
+
+    return response.json()
+
+
+def verify_microsoft_token(authorization):
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+    if not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Invalid Authorization header")
+
+    token = authorization.split(" ", 1)[1]
+
+    try:
+        jwks = microsoft_jwks()
+        unverified_header = jwt.get_unverified_header(token)
+
+        key = None
+        for jwk in jwks["keys"]:
+            if jwk["kid"] == unverified_header["kid"]:
+                key = jwk
+                break
+
+        if not key:
+            raise HTTPException(status_code=401, detail="Microsoft signing key not found")
+
+        claims = jwt.decode(
+            token,
+            key,
+            algorithms=["RS256"],
+            audience=MS_CLIENT_ID,
+            issuer=f"https://login.microsoftonline.com/{MS_TENANT_ID}/v2.0",
+        )
+
+        if MS_ALLOWED_GROUP_ID:
+            groups = claims.get("groups", [])
+
+            if MS_ALLOWED_GROUP_ID not in groups:
+                raise HTTPException(
+                    status_code=403,
+                    detail="User is not in the allowed Microsoft group",
+                )
+
+        return claims
+
+    except JWTError as e:
+        raise HTTPException(
+            status_code=401,
+            detail=f"Invalid Microsoft token: {str(e)}",
+        )
+
+
+def check_key(x_api_key=None, authorization=None):
+    # Temporary legacy API key support
+    if x_api_key and x_api_key == API_KEY:
+        return {
+            "auth_method": "api_key",
+        }
+
+    # Microsoft OAuth support
+    if authorization:
+        claims = verify_microsoft_token(authorization)
+
+        return {
+            "auth_method": "microsoft_oauth",
+            "claims": claims,
+        }
+
+    raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+# ============================================================
+# Headers / helpers
+# ============================================================
 
 def harvest_headers():
     return {
@@ -37,9 +128,6 @@ def airtable_headers():
         "Authorization": f"Bearer {AIRTABLE_TOKEN}",
         "Content-Type": "application/json",
     }
-
-import json
-from datetime import datetime, timezone
 
 
 def utc_now_iso():
@@ -76,6 +164,7 @@ def write_sync_log(
         return response.status_code in [200, 201]
     except Exception:
         return False
+
 
 def get_harvest_records(endpoint, key):
     records = []
@@ -211,6 +300,19 @@ def build_people_map(active_only=False):
     return people_map
 
 
+def build_task_map():
+    task_map = {}
+
+    for record in get_airtable_records("Tasks"):
+        fields = record.get("fields", {})
+        harvest_task_id = fields.get("Harvest Task ID")
+
+        if harvest_task_id is not None:
+            task_map[str(harvest_task_id)] = record["id"]
+
+    return task_map
+
+
 def map_project_billing_method(project):
     if project.get("is_fixed_fee"):
         return "Fixed fee"
@@ -233,14 +335,78 @@ def map_project_billing_method(project):
     return mapping.get(bill_by)
 
 
+# ============================================================
+# Basic routes
+# ============================================================
+
 @app.get("/")
 def root():
     return {"message": "DEG Sync API running"}
 
 
+@app.get("/status")
+def status(
+    x_api_key: str = Header(None),
+    authorization: str = Header(None),
+):
+    auth_info = check_key(
+        x_api_key=x_api_key,
+        authorization=authorization,
+    )
+
+    checks = {
+        "api": True,
+        "auth_method": auth_info.get("auth_method"),
+        "harvest_token_set": bool(HARVEST_TOKEN),
+        "harvest_account_id_set": bool(HARVEST_ACCOUNT_ID),
+        "airtable_token_set": bool(AIRTABLE_TOKEN),
+        "airtable_base_id_set": bool(AIRTABLE_BASE_ID),
+        "microsoft_tenant_id_set": bool(MS_TENANT_ID),
+        "microsoft_client_id_set": bool(MS_CLIENT_ID),
+        "microsoft_allowed_group_id_set": bool(MS_ALLOWED_GROUP_ID),
+    }
+
+    harvest_ok = False
+    airtable_ok = False
+
+    try:
+        response = requests.get(
+            "https://api.harvestapp.com/v2/users/me",
+            headers=harvest_headers(),
+        )
+        harvest_ok = response.status_code == 200
+    except Exception:
+        harvest_ok = False
+
+    try:
+        response = requests.get(
+            f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Clients",
+            headers=airtable_headers(),
+            params={"pageSize": 1},
+        )
+        airtable_ok = response.status_code == 200
+    except Exception:
+        airtable_ok = False
+
+    checks["harvest_connection_ok"] = harvest_ok
+    checks["airtable_connection_ok"] = airtable_ok
+
+    overall_status = "ok" if all(
+        value for key, value in checks.items() if key != "auth_method"
+    ) else "warning"
+
+    return {
+        "status": overall_status,
+        "checks": checks,
+    }
+
+
 @app.get("/test/airtable")
-def test_airtable(x_api_key: str = Header(None)):
-    check_key(x_api_key)
+def test_airtable(
+    x_api_key: str = Header(None),
+    authorization: str = Header(None),
+):
+    check_key(x_api_key=x_api_key, authorization=authorization)
 
     records = get_airtable_records("Clients")
 
@@ -251,9 +417,16 @@ def test_airtable(x_api_key: str = Header(None)):
     }
 
 
+# ============================================================
+# Sync endpoints
+# ============================================================
+
 @app.post("/sync/clients")
-def sync_clients(x_api_key: str = Header(None)):
-    check_key(x_api_key)
+def sync_clients(
+    x_api_key: str = Header(None),
+    authorization: str = Header(None),
+):
+    check_key(x_api_key=x_api_key, authorization=authorization)
 
     clients = get_harvest_records("clients", "clients")
 
@@ -284,37 +457,31 @@ def sync_clients(x_api_key: str = Header(None)):
                 if response.status_code in [200, 201]:
                     updated += 1
                 else:
-                    failed.append(
-                        {
-                            "client": client.get("name"),
-                            "action": "update",
-                            "status_code": response.status_code,
-                            "response": response.text,
-                        }
-                    )
+                    failed.append({
+                        "client": client.get("name"),
+                        "action": "update",
+                        "status_code": response.status_code,
+                        "response": response.text,
+                    })
             else:
                 response = create_airtable_record("Clients", fields)
 
                 if response.status_code in [200, 201]:
                     created += 1
                 else:
-                    failed.append(
-                        {
-                            "client": client.get("name"),
-                            "action": "create",
-                            "status_code": response.status_code,
-                            "response": response.text,
-                        }
-                    )
+                    failed.append({
+                        "client": client.get("name"),
+                        "action": "create",
+                        "status_code": response.status_code,
+                        "response": response.text,
+                    })
 
         except Exception as e:
-            failed.append(
-                {
-                    "client": client.get("name"),
-                    "action": "exception",
-                    "response": str(e),
-                }
-            )
+            failed.append({
+                "client": client.get("name"),
+                "action": "exception",
+                "response": str(e),
+            })
 
     return {
         "harvest_clients": len(clients),
@@ -326,8 +493,11 @@ def sync_clients(x_api_key: str = Header(None)):
 
 
 @app.post("/sync/contacts")
-def sync_contacts(x_api_key: str = Header(None)):
-    check_key(x_api_key)
+def sync_contacts(
+    x_api_key: str = Header(None),
+    authorization: str = Header(None),
+):
+    check_key(x_api_key=x_api_key, authorization=authorization)
 
     contacts = get_harvest_records("contacts", "contacts")
     client_map = build_client_map()
@@ -351,13 +521,11 @@ def sync_contacts(x_api_key: str = Header(None)):
 
         if not linked_client_record_id:
             skipped_missing_client += 1
-            failed.append(
-                {
-                    "contact": f"{contact.get('first_name', '')} {contact.get('last_name', '')}".strip(),
-                    "reason": "No matching Airtable client found",
-                    "harvest_client_id": harvest_client_id,
-                }
-            )
+            failed.append({
+                "contact": f"{contact.get('first_name', '')} {contact.get('last_name', '')}".strip(),
+                "reason": "No matching Airtable client found",
+                "harvest_client_id": harvest_client_id,
+            })
             continue
 
         first_name = contact.get("first_name") or ""
@@ -387,37 +555,31 @@ def sync_contacts(x_api_key: str = Header(None)):
                 if response.status_code in [200, 201]:
                     updated += 1
                 else:
-                    failed.append(
-                        {
-                            "contact": full_name,
-                            "action": "update",
-                            "status_code": response.status_code,
-                            "response": response.text,
-                        }
-                    )
+                    failed.append({
+                        "contact": full_name,
+                        "action": "update",
+                        "status_code": response.status_code,
+                        "response": response.text,
+                    })
             else:
                 response = create_airtable_record("Contacts", fields)
 
                 if response.status_code in [200, 201]:
                     created += 1
                 else:
-                    failed.append(
-                        {
-                            "contact": full_name,
-                            "action": "create",
-                            "status_code": response.status_code,
-                            "response": response.text,
-                        }
-                    )
+                    failed.append({
+                        "contact": full_name,
+                        "action": "create",
+                        "status_code": response.status_code,
+                        "response": response.text,
+                    })
 
         except Exception as e:
-            failed.append(
-                {
-                    "contact": full_name,
-                    "action": "exception",
-                    "response": str(e),
-                }
-            )
+            failed.append({
+                "contact": full_name,
+                "action": "exception",
+                "response": str(e),
+            })
 
     return {
         "harvest_contacts": len(contacts),
@@ -431,8 +593,11 @@ def sync_contacts(x_api_key: str = Header(None)):
 
 
 @app.post("/sync/projects")
-def sync_projects(x_api_key: str = Header(None)):
-    check_key(x_api_key)
+def sync_projects(
+    x_api_key: str = Header(None),
+    authorization: str = Header(None),
+):
+    check_key(x_api_key=x_api_key, authorization=authorization)
 
     projects = get_harvest_records("projects", "projects")
     client_map = build_client_map()
@@ -451,13 +616,11 @@ def sync_projects(x_api_key: str = Header(None)):
 
         if not linked_client_record_id:
             skipped_missing_client += 1
-            failed.append(
-                {
-                    "project": project.get("name"),
-                    "reason": "No matching Airtable client found",
-                    "harvest_client_id": harvest_client_id,
-                }
-            )
+            failed.append({
+                "project": project.get("name"),
+                "reason": "No matching Airtable client found",
+                "harvest_client_id": harvest_client_id,
+            })
             continue
 
         fields = {
@@ -492,37 +655,31 @@ def sync_projects(x_api_key: str = Header(None)):
                 if response.status_code in [200, 201]:
                     updated += 1
                 else:
-                    failed.append(
-                        {
-                            "project": project.get("name"),
-                            "action": "update",
-                            "status_code": response.status_code,
-                            "response": response.text,
-                        }
-                    )
+                    failed.append({
+                        "project": project.get("name"),
+                        "action": "update",
+                        "status_code": response.status_code,
+                        "response": response.text,
+                    })
             else:
                 response = create_airtable_record("Projects", fields)
 
                 if response.status_code in [200, 201]:
                     created += 1
                 else:
-                    failed.append(
-                        {
-                            "project": project.get("name"),
-                            "action": "create",
-                            "status_code": response.status_code,
-                            "response": response.text,
-                        }
-                    )
+                    failed.append({
+                        "project": project.get("name"),
+                        "action": "create",
+                        "status_code": response.status_code,
+                        "response": response.text,
+                    })
 
         except Exception as e:
-            failed.append(
-                {
-                    "project": project.get("name"),
-                    "action": "exception",
-                    "response": str(e),
-                }
-            )
+            failed.append({
+                "project": project.get("name"),
+                "action": "exception",
+                "response": str(e),
+            })
 
     return {
         "harvest_projects": len(projects),
@@ -535,8 +692,11 @@ def sync_projects(x_api_key: str = Header(None)):
 
 
 @app.post("/sync/people")
-def sync_people(x_api_key: str = Header(None)):
-    check_key(x_api_key)
+def sync_people(
+    x_api_key: str = Header(None),
+    authorization: str = Header(None),
+):
+    check_key(x_api_key=x_api_key, authorization=authorization)
 
     users = get_harvest_records("users", "users")
 
@@ -581,37 +741,31 @@ def sync_people(x_api_key: str = Header(None)):
                 if response.status_code in [200, 201]:
                     updated += 1
                 else:
-                    failed.append(
-                        {
-                            "user": full_name,
-                            "action": "update",
-                            "status_code": response.status_code,
-                            "response": response.text,
-                        }
-                    )
+                    failed.append({
+                        "user": full_name,
+                        "action": "update",
+                        "status_code": response.status_code,
+                        "response": response.text,
+                    })
             else:
                 response = create_airtable_record("People", fields)
 
                 if response.status_code in [200, 201]:
                     created += 1
                 else:
-                    failed.append(
-                        {
-                            "user": full_name,
-                            "action": "create",
-                            "status_code": response.status_code,
-                            "response": response.text,
-                        }
-                    )
+                    failed.append({
+                        "user": full_name,
+                        "action": "create",
+                        "status_code": response.status_code,
+                        "response": response.text,
+                    })
 
         except Exception as e:
-            failed.append(
-                {
-                    "user": full_name,
-                    "action": "exception",
-                    "response": str(e),
-                }
-            )
+            failed.append({
+                "user": full_name,
+                "action": "exception",
+                "response": str(e),
+            })
 
     return {
         "harvest_users": len(users),
@@ -624,8 +778,11 @@ def sync_people(x_api_key: str = Header(None)):
 
 
 @app.post("/sync/project-people")
-def sync_project_people(x_api_key: str = Header(None)):
-    check_key(x_api_key)
+def sync_project_people(
+    x_api_key: str = Header(None),
+    authorization: str = Header(None),
+):
+    check_key(x_api_key=x_api_key, authorization=authorization)
 
     assignments = get_harvest_records("user_assignments", "user_assignments")
 
@@ -661,10 +818,6 @@ def sync_project_people(x_api_key: str = Header(None)):
             skipped_inactive_or_missing_person += 1
             continue
 
-        if not project_record_id or not person_record_id:
-            skipped_missing_links += 1
-            continue
-
         user_name = (assignment.get("user") or {}).get("name") or ""
         project_name = (assignment.get("project") or {}).get("name") or ""
         name = f"{user_name} - {project_name}".strip(" -")
@@ -696,37 +849,31 @@ def sync_project_people(x_api_key: str = Header(None)):
                 if response.status_code in [200, 201]:
                     updated += 1
                 else:
-                    failed.append(
-                        {
-                            "assignment": assignment_id,
-                            "action": "update",
-                            "status_code": response.status_code,
-                            "response": response.text,
-                        }
-                    )
+                    failed.append({
+                        "assignment": assignment_id,
+                        "action": "update",
+                        "status_code": response.status_code,
+                        "response": response.text,
+                    })
             else:
                 response = create_airtable_record("Project People", fields)
 
                 if response.status_code in [200, 201]:
                     created += 1
                 else:
-                    failed.append(
-                        {
-                            "assignment": assignment_id,
-                            "action": "create",
-                            "status_code": response.status_code,
-                            "response": response.text,
-                        }
-                    )
+                    failed.append({
+                        "assignment": assignment_id,
+                        "action": "create",
+                        "status_code": response.status_code,
+                        "response": response.text,
+                    })
 
         except Exception as e:
-            failed.append(
-                {
-                    "assignment": assignment_id,
-                    "action": "exception",
-                    "response": str(e),
-                }
-            )
+            failed.append({
+                "assignment": assignment_id,
+                "action": "exception",
+                "response": str(e),
+            })
 
     return {
         "harvest_assignments": len(assignments),
@@ -740,9 +887,13 @@ def sync_project_people(x_api_key: str = Header(None)):
         "failed_examples": failed[:5],
     }
 
+
 @app.post("/sync/tasks")
-def sync_tasks(x_api_key: str = Header(None)):
-    check_key(x_api_key)
+def sync_tasks(
+    x_api_key: str = Header(None),
+    authorization: str = Header(None),
+):
+    check_key(x_api_key=x_api_key, authorization=authorization)
 
     tasks = get_harvest_records("tasks", "tasks")
 
@@ -807,22 +958,18 @@ def sync_tasks(x_api_key: str = Header(None)):
         "failed_examples": failed[:5],
     }
 
+
 @app.post("/sync/project-tasks")
-def sync_project_tasks(x_api_key: str = Header(None)):
-    check_key(x_api_key)
+def sync_project_tasks(
+    x_api_key: str = Header(None),
+    authorization: str = Header(None),
+):
+    check_key(x_api_key=x_api_key, authorization=authorization)
 
     assignments = get_harvest_records("task_assignments", "task_assignments")
 
     project_map = build_project_map(active_only=True)
-    task_map = {}
-
-    # Build task map
-    for record in get_airtable_records("Tasks"):
-        fields = record.get("fields", {})
-        harvest_task_id = fields.get("Harvest Task ID")
-
-        if harvest_task_id is not None:
-            task_map[str(harvest_task_id)] = record["id"]
+    task_map = build_task_map()
 
     created = 0
     updated = 0
@@ -913,18 +1060,15 @@ def sync_project_tasks(x_api_key: str = Header(None)):
         "failed_examples": failed[:5],
     }
 
-from datetime import datetime, timedelta, timezone
-
-from fastapi import Query
-
 
 @app.post("/sync/time-entries")
 def sync_time_entries(
     x_api_key: str = Header(None),
+    authorization: str = Header(None),
     from_date: str = Query(..., description="Start date in YYYY-MM-DD format"),
     to_date: str = Query(..., description="End date in YYYY-MM-DD format"),
 ):
-    check_key(x_api_key)
+    check_key(x_api_key=x_api_key, authorization=authorization)
     started_at = utc_now_iso()
 
     entries = []
@@ -954,14 +1098,7 @@ def sync_time_entries(
 
     project_map = build_project_map()
     people_map = build_people_map()
-
-    task_map = {}
-    for record in get_airtable_records("Tasks"):
-        fields = record.get("fields", {})
-        harvest_task_id = fields.get("Harvest Task ID")
-
-        if harvest_task_id is not None:
-            task_map[str(harvest_task_id)] = record["id"]
+    task_map = build_task_map()
 
     existing_time_entry_map = {}
     for record in get_airtable_records("Time Entries"):
@@ -1026,14 +1163,12 @@ def sync_time_entries(
                 if response.status_code in [200, 201]:
                     updated += 1
                 else:
-                    failed.append(
-                        {
-                            "entry": entry_id,
-                            "action": "update",
-                            "status_code": response.status_code,
-                            "response": response.text,
-                        }
-                    )
+                    failed.append({
+                        "entry": entry_id,
+                        "action": "update",
+                        "status_code": response.status_code,
+                        "response": response.text,
+                    })
 
             else:
                 response = create_airtable_record("Time Entries", fields)
@@ -1047,26 +1182,22 @@ def sync_time_entries(
                         pass
 
                 else:
-                    failed.append(
-                        {
-                            "entry": entry_id,
-                            "action": "create",
-                            "status_code": response.status_code,
-                            "response": response.text,
-                        }
-                    )
+                    failed.append({
+                        "entry": entry_id,
+                        "action": "create",
+                        "status_code": response.status_code,
+                        "response": response.text,
+                    })
 
         except Exception as e:
-            failed.append(
-                {
-                    "entry": entry_id,
-                    "action": "exception",
-                    "response": str(e),
-                }
-            )
+            failed.append({
+                "entry": entry_id,
+                "action": "exception",
+                "response": str(e),
+            })
 
     skipped = skipped_missing_links
-    status = "success" if len(failed) == 0 else "partial"
+    status_value = "success" if len(failed) == 0 else "partial"
 
     result = {
         "from_date": from_date,
@@ -1082,7 +1213,7 @@ def sync_time_entries(
     write_sync_log(
         sync_type="time-entries",
         started_at=started_at,
-        status=status,
+        status=status_value,
         created=created,
         updated=updated,
         skipped=skipped,
@@ -1092,16 +1223,15 @@ def sync_time_entries(
 
     return result
 
-from fastapi import Query
-
 
 @app.post("/sync/invoices")
 def sync_invoices(
     x_api_key: str = Header(None),
+    authorization: str = Header(None),
     from_date: str = Query(...),
     to_date: str = Query(...),
 ):
-    check_key(x_api_key)
+    check_key(x_api_key=x_api_key, authorization=authorization)
     started_at = utc_now_iso()
 
     invoices = []
@@ -1178,14 +1308,12 @@ def sync_invoices(
                 if response.status_code in [200, 201]:
                     updated += 1
                 else:
-                    failed.append(
-                        {
-                            "invoice": invoice_id,
-                            "action": "update",
-                            "status_code": response.status_code,
-                            "response": response.text,
-                        }
-                    )
+                    failed.append({
+                        "invoice": invoice_id,
+                        "action": "update",
+                        "status_code": response.status_code,
+                        "response": response.text,
+                    })
 
             else:
                 response = create_airtable_record("Invoices", fields)
@@ -1199,26 +1327,22 @@ def sync_invoices(
                         pass
 
                 else:
-                    failed.append(
-                        {
-                            "invoice": invoice_id,
-                            "action": "create",
-                            "status_code": response.status_code,
-                            "response": response.text,
-                        }
-                    )
+                    failed.append({
+                        "invoice": invoice_id,
+                        "action": "create",
+                        "status_code": response.status_code,
+                        "response": response.text,
+                    })
 
         except Exception as e:
-            failed.append(
-                {
-                    "invoice": invoice_id,
-                    "action": "exception",
-                    "response": str(e),
-                }
-            )
+            failed.append({
+                "invoice": invoice_id,
+                "action": "exception",
+                "response": str(e),
+            })
 
     skipped = skipped_missing_client
-    status = "success" if len(failed) == 0 else "partial"
+    status_value = "success" if len(failed) == 0 else "partial"
 
     result = {
         "from_date": from_date,
@@ -1234,7 +1358,7 @@ def sync_invoices(
     write_sync_log(
         sync_type="invoices",
         started_at=started_at,
-        status=status,
+        status=status_value,
         created=created,
         updated=updated,
         skipped=skipped,
@@ -1244,9 +1368,10 @@ def sync_invoices(
 
     return result
 
-from pydantic import BaseModel
-from typing import Optional
 
+# ============================================================
+# Create endpoints
+# ============================================================
 
 class CreateClientRequest(BaseModel):
     name: str
@@ -1259,10 +1384,10 @@ class CreateClientRequest(BaseModel):
 def create_client(
     payload: CreateClientRequest,
     x_api_key: str = Header(None),
+    authorization: str = Header(None),
 ):
-    check_key(x_api_key)
+    check_key(x_api_key=x_api_key, authorization=authorization)
 
-    # 1. Basic duplicate check in Harvest by client name
     existing_clients = get_harvest_records("clients", "clients")
 
     for client in existing_clients:
@@ -1273,7 +1398,6 @@ def create_client(
                 "harvest_client": client,
             }
 
-    # 2. Create client in Harvest
     harvest_payload = {
         "name": payload.name,
         "currency": payload.currency,
@@ -1294,9 +1418,7 @@ def create_client(
         )
 
     created_client = response.json()
-
-    # 3. Sync Harvest clients back into Airtable
-    sync_result = sync_clients(x_api_key=x_api_key)
+    sync_result = sync_clients(x_api_key=x_api_key, authorization=authorization)
 
     return {
         "status": "created",
@@ -1304,6 +1426,7 @@ def create_client(
         "harvest_client": created_client,
         "sync_result": sync_result,
     }
+
 
 class CreateContactRequest(BaseModel):
     client_name: Optional[str] = None
@@ -1319,8 +1442,9 @@ class CreateContactRequest(BaseModel):
 def create_contact(
     payload: CreateContactRequest,
     x_api_key: str = Header(None),
+    authorization: str = Header(None),
 ):
-    check_key(x_api_key)
+    check_key(x_api_key=x_api_key, authorization=authorization)
 
     if not payload.harvest_client_id and not payload.client_name:
         raise HTTPException(
@@ -1328,7 +1452,6 @@ def create_contact(
             detail="Provide either harvest_client_id or client_name.",
         )
 
-    # 1. Resolve Harvest client
     harvest_client = None
     clients = get_harvest_records("clients", "clients")
 
@@ -1351,7 +1474,6 @@ def create_contact(
 
     harvest_client_id = harvest_client.get("id")
 
-    # 2. Duplicate check in Harvest contacts
     existing_contacts = get_harvest_records("contacts", "contacts")
     incoming_email = (payload.email or "").strip().lower()
 
@@ -1378,7 +1500,6 @@ def create_contact(
                 "harvest_contact": contact,
             }
 
-    # 3. Create contact in Harvest
     harvest_payload = {
         "client_id": harvest_client_id,
         "first_name": payload.first_name,
@@ -1401,9 +1522,7 @@ def create_contact(
         )
 
     created_contact = response.json()
-
-    # 4. Sync Harvest contacts back into Airtable
-    sync_result = sync_contacts(x_api_key=x_api_key)
+    sync_result = sync_contacts(x_api_key=x_api_key, authorization=authorization)
 
     return {
         "status": "created",
@@ -1412,6 +1531,7 @@ def create_contact(
         "harvest_contact": created_contact,
         "sync_result": sync_result,
     }
+
 
 class CreateClientWithContactRequest(BaseModel):
     client_name: str
@@ -1430,10 +1550,10 @@ class CreateClientWithContactRequest(BaseModel):
 def create_client_with_contact(
     payload: CreateClientWithContactRequest,
     x_api_key: str = Header(None),
+    authorization: str = Header(None),
 ):
-    check_key(x_api_key)
+    check_key(x_api_key=x_api_key, authorization=authorization)
 
-    # 1. Check whether client already exists in Harvest
     clients = get_harvest_records("clients", "clients")
     harvest_client = None
     client_created = False
@@ -1443,7 +1563,6 @@ def create_client_with_contact(
             harvest_client = client
             break
 
-    # 2. Create client in Harvest if missing
     if not harvest_client:
         harvest_client_payload = {
             "name": payload.client_name,
@@ -1469,7 +1588,6 @@ def create_client_with_contact(
 
     harvest_client_id = harvest_client.get("id")
 
-    # 3. Check whether contact already exists in Harvest
     contacts = get_harvest_records("contacts", "contacts")
     harvest_contact = None
     contact_created = False
@@ -1495,7 +1613,6 @@ def create_client_with_contact(
             harvest_contact = contact
             break
 
-    # 4. Create contact in Harvest if missing
     if not harvest_contact:
         harvest_contact_payload = {
             "client_id": harvest_client_id,
@@ -1521,9 +1638,8 @@ def create_client_with_contact(
         harvest_contact = contact_response.json()
         contact_created = True
 
-    # 5. Sync Harvest back into Airtable
-    clients_sync_result = sync_clients(x_api_key=x_api_key)
-    contacts_sync_result = sync_contacts(x_api_key=x_api_key)
+    clients_sync_result = sync_clients(x_api_key=x_api_key, authorization=authorization)
+    contacts_sync_result = sync_contacts(x_api_key=x_api_key, authorization=authorization)
 
     return {
         "status": "completed",
@@ -1535,6 +1651,7 @@ def create_client_with_contact(
         "clients_sync_result": clients_sync_result,
         "contacts_sync_result": contacts_sync_result,
     }
+
 
 class CreatePersonRequest(BaseModel):
     first_name: str
@@ -1551,10 +1668,10 @@ class CreatePersonRequest(BaseModel):
 def create_person(
     payload: CreatePersonRequest,
     x_api_key: str = Header(None),
+    authorization: str = Header(None),
 ):
-    check_key(x_api_key)
+    check_key(x_api_key=x_api_key, authorization=authorization)
 
-    # 1. Duplicate check in Harvest users by email
     existing_users = get_harvest_records("users", "users")
     incoming_email = payload.email.strip().lower()
 
@@ -1568,7 +1685,6 @@ def create_person(
                 "harvest_user": user,
             }
 
-    # 2. Create user in Harvest
     harvest_payload = {
         "first_name": payload.first_name,
         "last_name": payload.last_name,
@@ -1597,9 +1713,7 @@ def create_person(
         )
 
     created_user = response.json()
-
-    # 3. Sync Harvest users back into Airtable
-    sync_result = sync_people(x_api_key=x_api_key)
+    sync_result = sync_people(x_api_key=x_api_key, authorization=authorization)
 
     return {
         "status": "created",
@@ -1607,6 +1721,7 @@ def create_person(
         "harvest_user": created_user,
         "sync_result": sync_result,
     }
+
 
 class CreateProjectRequest(BaseModel):
     client_name: Optional[str] = None
@@ -1617,8 +1732,6 @@ class CreateProjectRequest(BaseModel):
     is_active: bool = True
     is_billable: bool = True
     is_fixed_fee: bool = False
-
-    # Harvest accepts bill_by values such as Project, People, Task, or none depending on setup.
     bill_by: Optional[str] = "Project"
 
     hourly_rate: Optional[float] = None
@@ -1633,8 +1746,9 @@ class CreateProjectRequest(BaseModel):
 def create_project(
     payload: CreateProjectRequest,
     x_api_key: str = Header(None),
+    authorization: str = Header(None),
 ):
-    check_key(x_api_key)
+    check_key(x_api_key=x_api_key, authorization=authorization)
 
     if not payload.harvest_client_id and not payload.client_name:
         raise HTTPException(
@@ -1642,7 +1756,6 @@ def create_project(
             detail="Provide either harvest_client_id or client_name.",
         )
 
-    # 1. Resolve Harvest client
     harvest_client = None
     clients = get_harvest_records("clients", "clients")
 
@@ -1665,7 +1778,6 @@ def create_project(
 
     harvest_client_id = harvest_client.get("id")
 
-    # 2. Duplicate check in Harvest projects by client + project name/code
     existing_projects = get_harvest_records("projects", "projects")
 
     incoming_name = payload.name.strip().lower()
@@ -1687,7 +1799,6 @@ def create_project(
                 "harvest_project": project,
             }
 
-    # 3. Create project in Harvest
     harvest_payload = {
         "client_id": harvest_client_id,
         "name": payload.name,
@@ -1725,9 +1836,7 @@ def create_project(
         )
 
     created_project = response.json()
-
-    # 4. Sync Harvest projects back into Airtable
-    sync_result = sync_projects(x_api_key=x_api_key)
+    sync_result = sync_projects(x_api_key=x_api_key, authorization=authorization)
 
     return {
         "status": "created",
@@ -1735,48 +1844,4 @@ def create_project(
         "harvest_client": harvest_client,
         "harvest_project": created_project,
         "sync_result": sync_result,
-    }
-
-@app.get("/status")
-def status(x_api_key: str = Header(None)):
-    check_key(x_api_key)
-
-    checks = {
-        "api": True,
-        "harvest_token_set": bool(HARVEST_TOKEN),
-        "harvest_account_id_set": bool(HARVEST_ACCOUNT_ID),
-        "airtable_token_set": bool(AIRTABLE_TOKEN),
-        "airtable_base_id_set": bool(AIRTABLE_BASE_ID),
-    }
-
-    harvest_ok = False
-    airtable_ok = False
-
-    try:
-        response = requests.get(
-            "https://api.harvestapp.com/v2/users/me",
-            headers=harvest_headers(),
-        )
-        harvest_ok = response.status_code == 200
-    except Exception:
-        harvest_ok = False
-
-    try:
-        response = requests.get(
-            f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Clients",
-            headers=airtable_headers(),
-            params={"pageSize": 1},
-        )
-        airtable_ok = response.status_code == 200
-    except Exception:
-        airtable_ok = False
-
-    checks["harvest_connection_ok"] = harvest_ok
-    checks["airtable_connection_ok"] = airtable_ok
-
-    overall_status = "ok" if all(checks.values()) else "warning"
-
-    return {
-        "status": overall_status,
-        "checks": checks,
     }
