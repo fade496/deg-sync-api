@@ -66,16 +66,11 @@ def verify_microsoft_token(authorization):
         if not key:
             raise HTTPException(status_code=401, detail="Microsoft signing key not found")
 
-        valid_audiences = [
-            MS_CLIENT_ID,
-            f"api://{MS_CLIENT_ID}",
-        ]
-        
         claims = jwt.decode(
             token,
             key,
             algorithms=["RS256"],
-            audience=valid_audiences,
+            audience=f"api://{MS_CLIENT_ID}",
             issuer=f"https://login.microsoftonline.com/{MS_TENANT_ID}/v2.0",
         )
 
