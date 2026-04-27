@@ -21,3 +21,11 @@ def sync_contacts_route(
 ):
     check_key(x_api_key=x_api_key, authorization=authorization)
     return sync_contacts()
+
+@router.post("/projects")
+def sync_projects_route(
+    x_api_key: str = Header(None),
+    authorization: str = Header(None),
+):
+    check_key(x_api_key=x_api_key, authorization=authorization)
+    return sync_projects()
