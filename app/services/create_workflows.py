@@ -127,3 +127,148 @@ def create_contact_workflow(payload: CreateContactRequest):
         "harvest_contact": created_contact,
         "sync_result": sync_result,
     }
+
+from app.models.requests import CreateClientWithContactRequest
+
+
+def create_client_with_contact_workflow(payload: CreateClientWithContactRequest):
+    clients = get_harvest_records("clients", "clients")
+    harvest_client = None
+    client_created = False
+
+    for client in clients:
+        if (client.get("name") or "").strip().lower() == payload.client_name.strip().lower():
+            harvest_client = client
+            break
+
+    if not harvest_client:
+        harvest_client_payload = {
+            "name": payload.client_name,
+            "currency": payload.currency,
+            "address": payload.address or "",
+            "is_active": payload.is_active,
+        }
+
+        client_response = harvest_post("clients", harvest_client_payload)
+
+        if client_response.status_code not in [200, 201]:
+            raise HTTPException(
+                status_code=client_response.status_code,
+                detail=client_response.text,
+            )
+
+        harvest_client = client_response.json()
+        client_created = True
+
+    harvest_client_id = harvest_client.get("id")
+
+    contacts = get_harvest_records("contacts", "contacts")
+    harvest_contact = None
+    contact_created = False
+
+    incoming_email = (payload.contact_email or "").strip().lower()
+
+    for contact in contacts:
+        contact_email = (contact.get("email") or "").strip().lower()
+
+        if incoming_email and contact_email == incoming_email:
+            harvest_contact = contact
+            break
+
+        same_client = (contact.get("client") or {}).get("id") == harvest_client_id
+        same_name = (
+            (contact.get("first_name") or "").strip().lower()
+            == payload.contact_first_name.strip().lower()
+            and (contact.get("last_name") or "").strip().lower()
+            == payload.contact_last_name.strip().lower()
+        )
+
+        if same_client and same_name:
+            harvest_contact = contact
+            break
+
+    if not harvest_contact:
+        harvest_contact_payload = {
+            "client_id": harvest_client_id,
+            "first_name": payload.contact_first_name,
+            "last_name": payload.contact_last_name,
+            "email": payload.contact_email or "",
+            "phone_office": payload.contact_phone or "",
+            "title": payload.contact_title or "",
+        }
+
+        contact_response = harvest_post("contacts", harvest_contact_payload)
+
+        if contact_response.status_code not in [200, 201]:
+            raise HTTPException(
+                status_code=contact_response.status_code,
+                detail=contact_response.text,
+            )
+
+        harvest_contact = contact_response.json()
+        contact_created = True
+
+    clients_sync_result = sync_clients()
+    contacts_sync_result = sync_contacts()
+
+    return {
+        "status": "completed",
+        "message": "Client/contact workflow completed through Harvest and synced to Airtable.",
+        "client_created": client_created,
+        "contact_created": contact_created,
+        "harvest_client": harvest_client,
+        "harvest_contact": harvest_contact,
+        "clients_sync_result": clients_sync_result,
+        "contacts_sync_result": contacts_sync_result,
+    }
+
+from app.models.requests import CreatePersonRequest
+from app.services.sync_people import sync_people
+
+
+def create_person_workflow(payload: CreatePersonRequest):
+    existing_users = get_harvest_records("users", "users")
+    incoming_email = payload.email.strip().lower()
+
+    for user in existing_users:
+        user_email = (user.get("email") or "").strip().lower()
+
+        if user_email == incoming_email:
+            return {
+                "status": "duplicate_found",
+                "message": "Person already exists in Harvest by email. No new user was created.",
+                "harvest_user": user,
+            }
+
+    harvest_payload = {
+        "first_name": payload.first_name,
+        "last_name": payload.last_name,
+        "email": payload.email,
+        "telephone": payload.telephone or "",
+        "is_contractor": payload.is_contractor,
+        "is_active": payload.is_active,
+    }
+
+    if payload.default_hourly_rate is not None:
+        harvest_payload["default_hourly_rate"] = payload.default_hourly_rate
+
+    if payload.cost_rate is not None:
+        harvest_payload["cost_rate"] = payload.cost_rate
+
+    response = harvest_post("users", harvest_payload)
+
+    if response.status_code not in [200, 201]:
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=response.text,
+        )
+
+    created_user = response.json()
+    sync_result = sync_people()
+
+    return {
+        "status": "created",
+        "message": "Person created in Harvest and synced to Airtable.",
+        "harvest_user": created_user,
+        "sync_result": sync_result,
+    }
