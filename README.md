@@ -1,1 +1,0 @@
-# deg-sync-api
