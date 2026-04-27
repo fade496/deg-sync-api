@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 
-from app.routers import oauth, status, query, sync, create, update
+from app.routers import oauth, status, query, sync, create, update, test
 
 app = FastAPI(title="DEG Sync API")
 
@@ -16,3 +16,4 @@ app.include_router(query.router)
 app.include_router(sync.router)
 app.include_router(create.router)
 app.include_router(update.router)
+app.include_router(test.router)
