@@ -1,8 +1,16 @@
 from fastapi import FastAPI
 
-from app.routers import oauth, status, query, sync, create, update, test
-
-from app.routers import airtable_generic
+from app.routers import (
+    oauth,
+    status,
+    query,
+    sync,
+    create,
+    update,
+    test,
+    airtable_generic,
+    scheduler,
+)
 
 app = FastAPI(title="DEG Sync API")
 
@@ -20,3 +28,4 @@ app.include_router(create.router)
 app.include_router(update.router)
 app.include_router(test.router)
 app.include_router(airtable_generic.router)
+app.include_router(scheduler.router)
