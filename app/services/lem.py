@@ -55,11 +55,50 @@ def build_staging_timesheet(records, path: Path):
             })
 
 
+def normalize_project_record(fields: dict):
+    return {
+        "Project Code": fields.get("Project Code", ""),
+        "Project": fields.get("Name", ""),
+        "Billing Type": fields.get("Billing Type", ""),
+        "Approver First Name": fields.get("First Name (from Contact ID)", ""),
+        "Approver Last Name": fields.get("Last Name (from Contact ID)", ""),
+        "Approver Email": fields.get("Email (from Contact ID)", ""),
+        "Contracts": fields.get("Contracts", ""),
+        "Short Code": fields.get("Short Code", ""),
+    }
+
+
+def normalize_project_billing_record(fields: dict):
+    return {
+        "Project Code": fields.get("Project Code", ""),
+        "Billing Method": fields.get("Billing Method", ""),
+    }
+
+
+def normalize_people_record(fields: dict):
+    return {
+        "First Name": fields.get("First Name", ""),
+        "Last Name": fields.get("Last Name", ""),
+        "Craft Code 1": fields.get("Craft Code 1", ""),
+        "Craft Code 2": fields.get("Craft Code 2", ""),
+        "Craft Code 3": fields.get("Craft Code 3", ""),
+    }
+
+
 def build_airtable_json(projects, billing, people, path: Path):
     data = {
-        "projects": [record.get("fields", {}) for record in projects],
-        "project_billing": [record.get("fields", {}) for record in billing],
-        "people": [record.get("fields", {}) for record in people],
+        "projects": [
+            normalize_project_record(record.get("fields", {}))
+            for record in projects
+        ],
+        "project_billing": [
+            normalize_project_billing_record(record.get("fields", {}))
+            for record in billing
+        ],
+        "people": [
+            normalize_people_record(record.get("fields", {}))
+            for record in people
+        ],
     }
 
     path.write_text(json.dumps(data, default=str), encoding="utf-8")
@@ -111,9 +150,9 @@ def generate_lem(payload: LemGenerateRequest):
                 detail="No time entries found for the selected date range.",
             )
 
-        projects = get_airtable_records("Projects LEM")
-        billing = get_airtable_records("Project Billing LEM")
-        people = get_airtable_records("People LEM")
+        projects = get_airtable_records("Projects")
+        billing = get_airtable_records("Project Billing")
+        people = get_airtable_records("People")
 
         run_id = f"{payload.from_date}_to_{payload.to_date}".replace("-", "")
         output_dir = LEM_OUTPUT_ROOT / run_id
@@ -128,7 +167,12 @@ def generate_lem(payload: LemGenerateRequest):
 
             timesheet_path = tmp / "staging_timesheet.csv"
             airtable_path = tmp / "airtable.json"
-            template_path = Path("app/lem_engine/assets/report_template.xlsx")
+            template_path = (
+                Path(__file__).resolve().parent.parent
+                / "lem_engine"
+                / "assets"
+                / "report_template.xlsx"
+            )
 
             build_staging_timesheet(time_entries, timesheet_path)
             build_airtable_json(projects, billing, people, airtable_path)
