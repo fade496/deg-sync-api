@@ -2,6 +2,10 @@ import requests
 from fastapi import HTTPException
 
 from app.core.config import get_settings
+from app.core.airtable_write_rules import (
+    validate_generic_write_fields,
+    validate_generic_bulk_write_fields,
+)
 from app.clients.airtable import (
     airtable_headers,
     airtable_url,
@@ -118,6 +122,7 @@ def query_airtable(payload: AirtableQueryRequest):
 
 def add_airtable_record(payload: AirtableAddRequest):
     validate_table_exists(payload.table)
+    validate_generic_write_fields(payload.table, payload.fields)
 
     response = create_airtable_record(payload.table, payload.fields)
 
@@ -136,6 +141,7 @@ def add_airtable_record(payload: AirtableAddRequest):
 
 def update_airtable_generic_record(payload: AirtableUpdateRequest):
     validate_table_exists(payload.table)
+    validate_generic_write_fields(payload.table, payload.fields)
 
     response = update_airtable_record(
         payload.table,
@@ -159,11 +165,11 @@ def update_airtable_generic_record(payload: AirtableUpdateRequest):
 
 def bulk_add_airtable_records(payload: AirtableBulkAddRequest):
     validate_table_exists(payload.table)
+    validate_generic_bulk_write_fields(payload.table, payload.records)
 
     created = []
     failed = []
 
-    # Airtable batch create supports up to 10 records per request.
     batches = [
         payload.records[i:i + 10]
         for i in range(0, len(payload.records), 10)
@@ -207,10 +213,16 @@ def bulk_add_airtable_records(payload: AirtableBulkAddRequest):
 def bulk_update_airtable_records(payload: AirtableBulkUpdateRequest):
     validate_table_exists(payload.table)
 
+    records_as_fields = [
+        record.fields
+        for record in payload.records
+    ]
+
+    validate_generic_bulk_write_fields(payload.table, records_as_fields)
+
     updated = []
     failed = []
 
-    # Airtable batch update supports up to 10 records per request.
     batches = [
         payload.records[i:i + 10]
         for i in range(0, len(payload.records), 10)
@@ -262,6 +274,7 @@ def bulk_update_airtable_records(payload: AirtableBulkUpdateRequest):
 
 def bulk_edit_airtable_by_filter(payload: AirtableBulkEditByFilterRequest):
     validate_table_exists(payload.table)
+    validate_generic_write_fields(payload.table, payload.fields)
 
     query_payload = AirtableQueryRequest(
         table=payload.table,
