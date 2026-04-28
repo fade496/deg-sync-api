@@ -57,35 +57,35 @@ def build_staging_timesheet(records, path: Path):
 
 def normalize_project_record(fields: dict):
     return {
-        "Project Code": fields.get("Project Code", ""),
-        "Project": fields.get("Name", ""),
-        "Billing Type": fields.get("Billing Type", ""),
-        "Approver First Name": fields.get("First Name (from Contact ID)", ""),
-        "Approver Last Name": fields.get("Last Name (from Contact ID)", ""),
-        "Approver Email": fields.get("Email (from Contact ID)", ""),
-        "Contracts": fields.get("Contracts", ""),
-        "Short Code": fields.get("Short Code", ""),
+        "Project Code": airtable_value(fields.get("Project Code")),
+        "Project": airtable_value(fields.get("Name")),
+        "Billing Type": airtable_value(fields.get("Billing Type")),
+        "Approver First Name": airtable_value(fields.get("First Name (from Contact ID)")),
+        "Approver Last Name": airtable_value(fields.get("Last Name (from Contact ID)")),
+        "Approver Email": airtable_value(fields.get("Email (from Contact ID)")),
+        "Contracts": airtable_value(fields.get("Contracts")),
+        "Short Code": airtable_value(fields.get("Short Code")),
     }
 
 
 def normalize_project_billing_record(fields: dict):
     return {
-        "Project Code": fields.get("Project Code", ""),
-        "Billing Method": fields.get("Billing Method", ""),
+        "Project Code": airtable_value(fields.get("Project Code")),
+        "Billing Method": airtable_value(fields.get("Invoice Method")),
     }
 
 
 def normalize_people_record(fields: dict):
     return {
-        "First Name": fields.get("First Name", ""),
-        "Last Name": fields.get("Last Name", ""),
-        "Craft Code 1": fields.get("Craft Code 1", ""),
-        "Craft Code 2": fields.get("Craft Code 2", ""),
-        "Craft Code 3": fields.get("Craft Code 3", ""),
+        "First Name": airtable_value(fields.get("First Name")),
+        "Last Name": airtable_value(fields.get("Last Name")),
+        "Craft Code 1": airtable_value(fields.get("Craft Code 1")),
+        "Craft Code 2": airtable_value(fields.get("Craft Code 2")),
+        "Craft Code 3": airtable_value(fields.get("Craft Code 3")),
     }
 
 
-def build_airtable_json(projects, billing, people, path: Path):
+def build_airtable_json(projects, people, path: Path):
     data = {
         "projects": [
             normalize_project_record(record.get("fields", {}))
@@ -93,7 +93,7 @@ def build_airtable_json(projects, billing, people, path: Path):
         ],
         "project_billing": [
             normalize_project_billing_record(record.get("fields", {}))
-            for record in billing
+            for record in projects
         ],
         "people": [
             normalize_people_record(record.get("fields", {}))
@@ -108,7 +108,11 @@ def filter_time_entries_by_project_codes(records, project_codes):
     if not project_codes:
         return records
 
-    wanted = {code.strip() for code in project_codes if code and code.strip()}
+    wanted = {
+        code.strip()
+        for code in project_codes
+        if code and code.strip()
+    }
 
     return [
         record
@@ -151,7 +155,6 @@ def generate_lem(payload: LemGenerateRequest):
             )
 
         projects = get_airtable_records("Projects")
-        billing = get_airtable_records("Project Billing")
         people = get_airtable_records("People")
 
         run_id = f"{payload.from_date}_to_{payload.to_date}".replace("-", "")
@@ -175,7 +178,7 @@ def generate_lem(payload: LemGenerateRequest):
             )
 
             build_staging_timesheet(time_entries, timesheet_path)
-            build_airtable_json(projects, billing, people, airtable_path)
+            build_airtable_json(projects, people, airtable_path)
 
             make_lem.main_cli(
                 timesheet=str(timesheet_path),
