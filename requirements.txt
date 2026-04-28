@@ -2,3 +2,6 @@ fastapi
 uvicorn[standard]
 requests
 python-jose[cryptography]
+pandas
+openpyxl
+reportlab
