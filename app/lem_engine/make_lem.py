@@ -79,27 +79,52 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--template", help="Path to XLSX report template")
     return p.parse_args()
 
+def main_cli(
+    timesheet: str,
+    airtable_json: str,
+    output_dir: str,
+    template: str | None = None,
+) -> int:
+    try:
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        errors: list[str] = []
+        airtable = load_airtable(Path(airtable_json))
+        rows = load_timesheet(Path(timesheet))
+        normalized = normalize_rows(rows, airtable, errors)
+
+        if not normalized:
+            raise LemBuildError("No valid rows were produced from the timesheet.")
+
+        write_contract_csvs(normalized, output_path)
+        create_reports(
+            normalized,
+            output_path,
+            Path(template) if template else None,
+        )
+
+        if errors:
+            (output_path / "errors.txt").write_text(
+                "\n".join(errors),
+                encoding="utf-8",
+            )
+
+        return 0
+
+    except Exception as exc:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        (Path(output_dir) / "errors.txt").write_text(str(exc), encoding="utf-8")
+        raise
 
 def main() -> int:
     args = parse_args()
-    try:
-        output_dir = Path(args.output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        errors: list[str] = []
-        airtable = load_airtable(Path(args.airtable_json))
-        rows = load_timesheet(Path(args.timesheet))
-        normalized = normalize_rows(rows, airtable, errors)
-        if not normalized:
-            raise LemBuildError("No valid rows were produced from the timesheet.")
-        write_contract_csvs(normalized, output_dir)
-        create_reports(normalized, output_dir, Path(args.template) if args.template else None)
-        if errors:
-            (output_dir / "errors.txt").write_text("\n".join(errors), encoding="utf-8")
-        return 0
-    except Exception as exc:  # noqa: BLE001
-        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-        (Path(args.output_dir) / "errors.txt").write_text(str(exc), encoding="utf-8")
-        raise
+    return main_cli(
+        timesheet=args.timesheet,
+        airtable_json=args.airtable_json,
+        output_dir=args.output_dir,
+        template=args.template,
+    )
 
 
 def load_airtable(path: Path) -> dict[str, Any]:
