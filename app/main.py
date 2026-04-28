@@ -10,6 +10,7 @@ from app.routers import (
     test,
     airtable_generic,
     scheduler,
+    lem,
 )
 
 app = FastAPI(title="DEG Sync API")
@@ -29,3 +30,4 @@ app.include_router(update.router)
 app.include_router(test.router)
 app.include_router(airtable_generic.router)
 app.include_router(scheduler.router)
+app.include_router(lem.router)
