@@ -1,10 +1,10 @@
 from fastapi import FastAPI
 from app.routers import lem
 
-app = FastAPI(title="DEG Sync API")
+app = FastAPI()
 
 @app.get("/")
 def root():
-    return {"message": "DEG Sync API running"}
+    return {"ok": True}
 
 app.include_router(lem.router)
