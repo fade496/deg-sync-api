@@ -4,5 +4,5 @@ router = APIRouter(prefix="/lem", tags=["lem"])
 
 
 @router.get("/ping")
-def ping_lem():
+def ping():
     return {"lem": "ok"}
