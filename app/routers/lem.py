@@ -1,17 +1,8 @@
-from fastapi import APIRouter, Header
-
-from app.core.auth import check_key
-from app.models.lem_requests import LemGenerateRequest
-from app.services.lem import generate_lem
+from fastapi import APIRouter
 
 router = APIRouter(prefix="/lem", tags=["lem"])
 
 
-@router.post("/generate")
-def generate_lem_route(
-    payload: LemGenerateRequest,
-    x_api_key: str = Header(None),
-    authorization: str = Header(None),
-):
-    check_key(x_api_key=x_api_key, authorization=authorization)
-    return generate_lem(payload)
+@router.get("/ping")
+def ping_lem():
+    return {"lem": "ok"}
