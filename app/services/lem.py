@@ -1,4 +1,6 @@
 import os
+import csv
+import tempfile
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -22,49 +24,34 @@ TABLES = {
 # Airtable helpers
 # ----------------------------
 
-def airtable_headers() -> Dict[str, str]:
+def airtable_headers():
     api_key = os.getenv("AIRTABLE_API_KEY")
-
     if not api_key:
         raise HTTPException(status_code=500, detail="Missing AIRTABLE_API_KEY")
-
-    return {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+    return {"Authorization": f"Bearer {api_key}"}
 
 
-def airtable_list_records(
-    table_id: str,
-    *,
-    formula: Optional[str] = None,
-) -> List[Dict[str, Any]]:
+def airtable_list_records(table_id, formula=None):
     records = []
     offset = None
 
     while True:
         params = {"pageSize": 100}
-
         if formula:
             params["filterByFormula"] = formula
-
         if offset:
             params["offset"] = offset
 
-        response = requests.get(
+        r = requests.get(
             f"{AIRTABLE_API_ROOT}/{table_id}",
             headers=airtable_headers(),
             params=params,
-            timeout=60,
         )
 
-        if response.status_code >= 400:
-            raise HTTPException(
-                status_code=500,
-                detail=response.text,
-            )
+        if r.status_code >= 400:
+            raise HTTPException(status_code=500, detail=r.text)
 
-        data = response.json()
+        data = r.json()
         records.extend(data.get("records", []))
         offset = data.get("offset")
 
@@ -74,43 +61,38 @@ def airtable_list_records(
     return records
 
 
-def airtable_get_by_ids(table_id: str, ids: List[str]):
+def airtable_get_by_ids(table_id, ids):
     if not ids:
         return {}
 
-    result = {}
+    out = {}
 
     for i in range(0, len(ids), 20):
         chunk = ids[i:i + 20]
 
-        formula = "OR(" + ",".join(
-            [f"RECORD_ID()='{x}'" for x in chunk]
-        ) + ")"
+        formula = "OR(" + ",".join([f"RECORD_ID()='{x}'" for x in chunk]) + ")"
 
-        records = airtable_list_records(table_id, formula=formula)
+        recs = airtable_list_records(table_id, formula)
 
-        for r in records:
-            result[r["id"]] = r["fields"]
+        for r in recs:
+            out[r["id"]] = r["fields"]
 
-    return result
+    return out
 
 
 # ----------------------------
 # Core helpers
 # ----------------------------
 
-def first_link(value):
-    if isinstance(value, list) and value:
-        return value[0]
-    return None
+def first_link(v):
+    return v[0] if isinstance(v, list) and v else None
 
 
 def load_mapping():
-    records = airtable_list_records(TABLES["mapping"])
+    recs = airtable_list_records(TABLES["mapping"])
 
     mapping = []
-
-    for r in records:
+    for r in recs:
         f = r["fields"]
 
         mapping.append({
@@ -132,25 +114,22 @@ def load_time_entries(from_date, to_date):
         ")"
     )
 
-    return airtable_list_records(TABLES["time_entries"], formula=formula)
+    return airtable_list_records(TABLES["time_entries"], formula)
 
 
 def hydrate(time_entries):
-    project_ids = set()
-    person_ids = set()
-    task_ids = set()
+    p_ids, u_ids, t_ids = set(), set(), set()
 
     for r in time_entries:
         f = r["fields"]
-
-        project_ids.add(first_link(f.get("Project")))
-        person_ids.add(first_link(f.get("Person")))
-        task_ids.add(first_link(f.get("Task")))
+        p_ids.add(first_link(f.get("Project")))
+        u_ids.add(first_link(f.get("Person")))
+        t_ids.add(first_link(f.get("Task")))
 
     return (
-        airtable_get_by_ids(TABLES["projects"], list(project_ids)),
-        airtable_get_by_ids(TABLES["people"], list(person_ids)),
-        airtable_get_by_ids(TABLES["tasks"], list(task_ids)),
+        airtable_get_by_ids(TABLES["projects"], list(p_ids)),
+        airtable_get_by_ids(TABLES["people"], list(u_ids)),
+        airtable_get_by_ids(TABLES["tasks"], list(t_ids)),
     )
 
 
@@ -158,27 +137,43 @@ def hydrate(time_entries):
 # Mapping engine
 # ----------------------------
 
-def extract_value(row, mapping_row):
-    source = mapping_row["source"]
-    field = mapping_row["field"]
-    value = mapping_row["value"]
+def extract(row, m):
+    if m["value"]:
+        return m["value"]
 
-    if value:
-        return value
+    src = m["source"]
+    fld = m["field"]
 
-    if source == "Time Entries":
-        return row["time"].get(field)
-
-    if source == "Projects":
-        return row["project"].get(field)
-
-    if source == "People":
-        return row["person"].get(field)
-
-    if source == "Tasks":
-        return row["task"].get(field)
+    if src == "Time Entries":
+        return row["time"].get(fld)
+    if src == "Projects":
+        return row["project"].get(fld)
+    if src == "People":
+        return row["person"].get(fld)
+    if src == "Tasks":
+        return row["task"].get(fld)
 
     return None
+
+
+# ----------------------------
+# CSV Writer
+# ----------------------------
+
+def write_csv(rows):
+    if not rows:
+        return None
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".csv")
+
+    headers = list(rows[0].keys())
+
+    with open(tmp.name, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    return tmp.name
 
 
 # ----------------------------
@@ -191,35 +186,32 @@ def generate_lem(payload):
 
     projects, people, tasks = hydrate(time_entries)
 
-    lem_rows = []
+    rows = []
 
     for r in time_entries:
         f = r["fields"]
 
-        project_id = first_link(f.get("Project"))
-        person_id = first_link(f.get("Person"))
-        task_id = first_link(f.get("Task"))
-
         row = {
             "time": f,
-            "project": projects.get(project_id, {}),
-            "person": people.get(person_id, {}),
-            "task": tasks.get(task_id, {}),
+            "project": projects.get(first_link(f.get("Project")), {}),
+            "person": people.get(first_link(f.get("Person")), {}),
+            "task": tasks.get(first_link(f.get("Task")), {}),
         }
 
-        lem_row = {}
+        out = {}
 
         for m in mapping:
             if not m["lem_field"]:
                 continue
 
-            val = extract_value(row, m)
-            lem_row[m["lem_field"]] = val
+            out[m["lem_field"]] = extract(row, m)
 
-        lem_rows.append(lem_row)
+        rows.append(out)
+
+    csv_path = write_csv(rows)
 
     return {
-        "status": "lem_rows_built",
-        "row_count": len(lem_rows),
-        "sample": lem_rows[:5],
+        "status": "csv_generated",
+        "row_count": len(rows),
+        "file_path": csv_path,
     }
