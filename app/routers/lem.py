@@ -1,5 +1,7 @@
 from fastapi import APIRouter
+
 from app.models.lem_requests import LemGenerateRequest
+from app.services.lem import generate_lem
 
 router = APIRouter(prefix="/lem", tags=["lem"])
 
@@ -11,4 +13,4 @@ def ping():
 
 @router.post("/generate")
 def generate(payload: LemGenerateRequest):
-    return {"received": payload.dict()}
+    return generate_lem(payload)
