@@ -1,7 +1,9 @@
 import os
 import csv
+import re
 import tempfile
-from typing import Any, Dict, List, Optional
+from datetime import datetime
+from typing import Any
 
 import requests
 from fastapi import HTTPException
@@ -24,7 +26,6 @@ def airtable_headers():
     api_key = os.getenv("AIRTABLE_API_KEY")
     if not api_key:
         raise HTTPException(status_code=500, detail="Missing AIRTABLE_API_KEY")
-
     return {"Authorization": f"Bearer {api_key}"}
 
 
@@ -34,10 +35,8 @@ def airtable_list_records(table_id, formula=None):
 
     while True:
         params = {"pageSize": 100}
-
         if formula:
             params["filterByFormula"] = formula
-
         if offset:
             params["offset"] = offset
 
@@ -61,8 +60,8 @@ def airtable_list_records(table_id, formula=None):
 
         data = response.json()
         records.extend(data.get("records", []))
-
         offset = data.get("offset")
+
         if not offset:
             break
 
@@ -71,7 +70,6 @@ def airtable_list_records(table_id, formula=None):
 
 def airtable_get_by_ids(table_id, ids):
     ids = [x for x in ids if x]
-
     if not ids:
         return {}
 
@@ -79,7 +77,6 @@ def airtable_get_by_ids(table_id, ids):
 
     for i in range(0, len(ids), 20):
         chunk = ids[i:i + 20]
-
         formula = "OR(" + ",".join(
             [f"RECORD_ID()='{record_id}'" for record_id in chunk]
         ) + ")"
@@ -98,9 +95,45 @@ def first_link(value):
     return None
 
 
+def clean_value(value: Any):
+    if isinstance(value, list):
+        if not value:
+            return ""
+        if len(value) == 1:
+            return clean_value(value[0])
+        return ", ".join(str(clean_value(v)) for v in value)
+
+    if isinstance(value, dict):
+        return value.get("name") or value.get("id") or str(value)
+
+    if value is None:
+        return ""
+
+    return value
+
+
+def format_workdate(value):
+    if not value:
+        return ""
+
+    try:
+        return datetime.fromisoformat(str(value)).strftime("%m/%d/%Y")
+    except ValueError:
+        return value
+
+
+def extract_wo(task_value, notes_value):
+    text = f"{task_value or ''} {notes_value or ''}"
+
+    match = re.search(r"WO[-\s:]?(\d+)", text, flags=re.IGNORECASE)
+    if match:
+        return match.group(1)
+
+    return ""
+
+
 def load_mapping():
     records = airtable_list_records(TABLES["mapping"])
-
     mapping = []
 
     for record in records:
@@ -108,11 +141,11 @@ def load_mapping():
 
         mapping.append({
             "index": fields.get("Index", 9999),
-            "source": fields.get("Source"),
-            "field": fields.get("Field"),
-            "value": fields.get("Value"),
-            "lem_field": fields.get("LEM Field"),
-            "report_field": fields.get("Report Field"),
+            "source": fields.get("Source", ""),
+            "field": fields.get("Field", ""),
+            "value": fields.get("Value", ""),
+            "lem_field": fields.get("LEM Field", ""),
+            "report_field": fields.get("Report Field", ""),
         })
 
     return sorted(mapping, key=lambda row: row["index"])
@@ -148,30 +181,64 @@ def hydrate(time_entries):
     return projects, people, tasks
 
 
-def extract(row, mapping_row):
-    value = mapping_row.get("value")
-    if value:
-        return value
-
-    source = mapping_row.get("source")
-    field = mapping_row.get("field")
-
-    if source in ("Airtable - Time Entries", "Time Entries"):
-        return row["time"].get(field)
-
-    if source in ("Airtable - Projects", "Projects"):
-        return row["project"].get(field)
-
-    if source in ("Airtable - People", "People"):
-        return row["person"].get(field)
-
-    if source in ("Airtable - Tasks", "Tasks"):
-        return row["task"].get(field)
+def get_source_table(row_context, source):
+    source = (source or "").strip().lower()
 
     if source == "constant":
-        return value
+        return None
 
-    return None
+    if source in ("airtable - time entries", "time entries"):
+        return row_context["time"]
+
+    if source in ("airtable - projects", "projects"):
+        return row_context["project"]
+
+    if source in ("airtable - people", "people"):
+        return row_context["person"]
+
+    if source in ("airtable - tasks", "tasks"):
+        return row_context["task"]
+
+    return {}
+
+
+def extract(row_context, mapping_row):
+    source = (mapping_row.get("source") or "").strip()
+    field = (mapping_row.get("field") or "").strip()
+    value = mapping_row.get("value")
+
+    # Only rows marked constant use the literal Value column.
+    if source.lower() == "constant":
+        return clean_value(value)
+
+    source_table = get_source_table(row_context, source)
+
+    # Special mapping rules from your Mapping table.
+    if field == "Spent Date":
+        return format_workdate(row_context["time"].get("Spent Date"))
+
+    if field == "Task/Notes":
+        task_name = row_context["task"].get("Name")
+        notes = row_context["time"].get("Notes")
+        return extract_wo(task_name, notes)
+
+    if field == "Task":
+        return clean_value(row_context["task"].get("Name"))
+
+    if field == "Person":
+        return clean_value(row_context["person"].get("Full Name"))
+
+    if field in ("Craft Code 1/Craft Code 2/Craft Code 3", "Craft"):
+        return clean_value(
+            row_context["person"].get("Description (from Craft1)")
+            or row_context["person"].get("Craft1")
+        )
+
+    # Normal table-field lookup.
+    if source_table and field:
+        return clean_value(source_table.get(field))
+
+    return ""
 
 
 def write_csv(rows):
@@ -199,7 +266,6 @@ def write_csv(rows):
 def generate_lem(payload):
     mapping = load_mapping()
     time_entries = load_time_entries(payload.from_date, payload.to_date)
-
     projects, people, tasks = hydrate(time_entries)
 
     rows = []
