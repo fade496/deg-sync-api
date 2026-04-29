@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-
+from app.routers import lem
 from app.routers import (
     oauth,
     status,
@@ -29,3 +29,4 @@ app.include_router(update.router)
 app.include_router(test.router)
 app.include_router(airtable_generic.router)
 app.include_router(scheduler.router)
+app.include_router(lem.router)
