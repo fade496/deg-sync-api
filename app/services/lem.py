@@ -18,14 +18,15 @@ TABLES = {
 }
 
 
+# ----------------------------
+# Airtable helpers
+# ----------------------------
+
 def airtable_headers() -> Dict[str, str]:
     api_key = os.getenv("AIRTABLE_API_KEY")
 
     if not api_key:
-        raise HTTPException(
-            status_code=500,
-            detail="Missing AIRTABLE_API_KEY",
-        )
+        raise HTTPException(status_code=500, detail="Missing AIRTABLE_API_KEY")
 
     return {
         "Authorization": f"Bearer {api_key}",
@@ -36,18 +37,13 @@ def airtable_headers() -> Dict[str, str]:
 def airtable_list_records(
     table_id: str,
     *,
-    field_ids: Optional[List[str]] = None,
     formula: Optional[str] = None,
-    page_size: int = 100,
 ) -> List[Dict[str, Any]]:
-    records: List[Dict[str, Any]] = []
-    offset: Optional[str] = None
+    records = []
+    offset = None
 
     while True:
-        params: Dict[str, Any] = {"pageSize": page_size}
-
-        if field_ids:
-            params["fields[]"] = field_ids
+        params = {"pageSize": 100}
 
         if formula:
             params["filterByFormula"] = formula
@@ -65,79 +61,70 @@ def airtable_list_records(
         if response.status_code >= 400:
             raise HTTPException(
                 status_code=500,
-                detail={
-                    "message": "Airtable read failed",
-                    "table_id": table_id,
-                    "status_code": response.status_code,
-                    "response": response.text,
-                },
+                detail=response.text,
             )
 
         data = response.json()
         records.extend(data.get("records", []))
-
         offset = data.get("offset")
+
         if not offset:
             break
 
     return records
 
 
-def airtable_get_by_ids(
-    table_id: str,
-    ids: List[str],
-) -> Dict[str, Dict[str, Any]]:
+def airtable_get_by_ids(table_id: str, ids: List[str]):
     if not ids:
         return {}
 
-    records_map: Dict[str, Dict[str, Any]] = {}
+    result = {}
 
     for i in range(0, len(ids), 20):
         chunk = ids[i:i + 20]
 
         formula = "OR(" + ",".join(
-            [f"RECORD_ID()='{record_id}'" for record_id in chunk]
+            [f"RECORD_ID()='{x}'" for x in chunk]
         ) + ")"
 
-        records = airtable_list_records(
-            table_id,
-            formula=formula,
-        )
+        records = airtable_list_records(table_id, formula=formula)
 
-        for record in records:
-            records_map[record["id"]] = record.get("fields", {})
+        for r in records:
+            result[r["id"]] = r["fields"]
 
-    return records_map
+    return result
 
 
-def first_link(value: Any) -> Optional[str]:
+# ----------------------------
+# Core helpers
+# ----------------------------
+
+def first_link(value):
     if isinstance(value, list) and value:
         return value[0]
     return None
 
 
-def load_mapping() -> List[Dict[str, Any]]:
+def load_mapping():
     records = airtable_list_records(TABLES["mapping"])
 
-    mapping: List[Dict[str, Any]] = []
+    mapping = []
 
-    for record in records:
-        fields = record.get("fields", {})
+    for r in records:
+        f = r["fields"]
 
         mapping.append({
-            "record_id": record.get("id"),
-            "index": fields.get("Index", 9999),
-            "source": fields.get("Source", ""),
-            "field": fields.get("Field", ""),
-            "value": fields.get("Value", ""),
-            "lem_field": fields.get("LEM Field", ""),
-            "report_field": fields.get("Report Field", ""),
+            "index": f.get("Index", 9999),
+            "source": f.get("Source"),
+            "field": f.get("Field"),
+            "value": f.get("Value"),
+            "lem_field": f.get("LEM Field"),
         })
 
-    return sorted(mapping, key=lambda row: row["index"])
+    return sorted(mapping, key=lambda x: x["index"])
 
 
-def load_time_entries(from_date: str, to_date: str) -> List[Dict[str, Any]]:
+def load_time_entries(from_date, to_date):
     formula = (
         "AND("
         f"IS_AFTER({{Spent Date}}, DATEADD('{from_date}', -1, 'days')), "
@@ -145,63 +132,94 @@ def load_time_entries(from_date: str, to_date: str) -> List[Dict[str, Any]]:
         ")"
     )
 
-    return airtable_list_records(
-        TABLES["time_entries"],
-        formula=formula,
-    )
+    return airtable_list_records(TABLES["time_entries"], formula=formula)
 
 
-def hydrate_records(
-    time_entries: List[Dict[str, Any]],
-) -> tuple[
-    Dict[str, Dict[str, Any]],
-    Dict[str, Dict[str, Any]],
-    Dict[str, Dict[str, Any]],
-]:
+def hydrate(time_entries):
     project_ids = set()
     person_ids = set()
     task_ids = set()
 
-    for record in time_entries:
-        fields = record.get("fields", {})
+    for r in time_entries:
+        f = r["fields"]
 
-        project_id = first_link(fields.get("Project"))
-        person_id = first_link(fields.get("Person"))
-        task_id = first_link(fields.get("Task"))
+        project_ids.add(first_link(f.get("Project")))
+        person_ids.add(first_link(f.get("Person")))
+        task_ids.add(first_link(f.get("Task")))
 
-        if project_id:
-            project_ids.add(project_id)
+    return (
+        airtable_get_by_ids(TABLES["projects"], list(project_ids)),
+        airtable_get_by_ids(TABLES["people"], list(person_ids)),
+        airtable_get_by_ids(TABLES["tasks"], list(task_ids)),
+    )
 
-        if person_id:
-            person_ids.add(person_id)
 
-        if task_id:
-            task_ids.add(task_id)
+# ----------------------------
+# Mapping engine
+# ----------------------------
 
-    projects = airtable_get_by_ids(TABLES["projects"], list(project_ids))
-    people = airtable_get_by_ids(TABLES["people"], list(person_ids))
-    tasks = airtable_get_by_ids(TABLES["tasks"], list(task_ids))
+def extract_value(row, mapping_row):
+    source = mapping_row["source"]
+    field = mapping_row["field"]
+    value = mapping_row["value"]
 
-    return projects, people, tasks
+    if value:
+        return value
 
+    if source == "Time Entries":
+        return row["time"].get(field)
+
+    if source == "Projects":
+        return row["project"].get(field)
+
+    if source == "People":
+        return row["person"].get(field)
+
+    if source == "Tasks":
+        return row["task"].get(field)
+
+    return None
+
+
+# ----------------------------
+# MAIN
+# ----------------------------
 
 def generate_lem(payload):
     mapping = load_mapping()
     time_entries = load_time_entries(payload.from_date, payload.to_date)
 
-    projects, people, tasks = hydrate_records(time_entries)
+    projects, people, tasks = hydrate(time_entries)
+
+    lem_rows = []
+
+    for r in time_entries:
+        f = r["fields"]
+
+        project_id = first_link(f.get("Project"))
+        person_id = first_link(f.get("Person"))
+        task_id = first_link(f.get("Task"))
+
+        row = {
+            "time": f,
+            "project": projects.get(project_id, {}),
+            "person": people.get(person_id, {}),
+            "task": tasks.get(task_id, {}),
+        }
+
+        lem_row = {}
+
+        for m in mapping:
+            if not m["lem_field"]:
+                continue
+
+            val = extract_value(row, m)
+            lem_row[m["lem_field"]] = val
+
+        lem_rows.append(lem_row)
 
     return {
-        "status": "date_filtered_hydration_complete",
-        "from_date": payload.from_date,
-        "to_date": payload.to_date,
-        "mapping_count": len(mapping),
-        "time_entries_count": len(time_entries),
-        "projects_count": len(projects),
-        "people_count": len(people),
-        "tasks_count": len(tasks),
-        "sample_time_entry": time_entries[:1],
-        "sample_project": list(projects.values())[:1],
-        "sample_person": list(people.values())[:1],
-        "sample_task": list(tasks.values())[:1],
+        "status": "lem_rows_built",
+        "row_count": len(lem_rows),
+        "sample": lem_rows[:5],
     }
