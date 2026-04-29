@@ -2,6 +2,7 @@ import os
 import csv
 import re
 import tempfile
+import zipfile
 from datetime import datetime
 from typing import Any
 
@@ -19,6 +20,7 @@ TABLES = {
     "projects": "tblDSMSWBOtotSwEX",
     "people": "tblr5TZn5JPgcLPdd",
     "tasks": "tblrzzJqP5fNH2lOn",
+    "contracts": "tblSOm11yRrU6gckp",
 }
 
 
@@ -112,6 +114,13 @@ def clean_value(value: Any):
     return value
 
 
+def safe_filename(value):
+    text = str(value or "").strip()
+    text = re.sub(r"[^\w.\- ]+", "", text)
+    text = text.replace(" ", "_")
+    return text or "LEM"
+
+
 def format_workdate(value):
     if not value:
         return ""
@@ -122,14 +131,16 @@ def format_workdate(value):
         return value
 
 
+def format_lem_date_name(from_date, to_date):
+    start = datetime.fromisoformat(from_date)
+    end = datetime.fromisoformat(to_date)
+    return f"{start:%m.%d}-{end:%d.%Y}"
+
+
 def extract_wo(task_value, notes_value):
     text = f"{task_value or ''} {notes_value or ''}"
-
     match = re.search(r"WO[-\s:]?(\d+)", text, flags=re.IGNORECASE)
-    if match:
-        return match.group(1)
-
-    return ""
+    return match.group(1) if match else ""
 
 
 def load_mapping():
@@ -162,6 +173,10 @@ def load_time_entries(from_date, to_date):
     return airtable_list_records(TABLES["time_entries"], formula=formula)
 
 
+def load_contracts():
+    return [record.get("fields", {}) for record in airtable_list_records(TABLES["contracts"])]
+
+
 def hydrate(time_entries):
     project_ids = set()
     person_ids = set()
@@ -169,7 +184,6 @@ def hydrate(time_entries):
 
     for record in time_entries:
         fields = record.get("fields", {})
-
         project_ids.add(first_link(fields.get("Project")))
         person_ids.add(first_link(fields.get("Person")))
         task_ids.add(first_link(fields.get("Task")))
@@ -179,6 +193,44 @@ def hydrate(time_entries):
     tasks = airtable_get_by_ids(TABLES["tasks"], list(task_ids))
 
     return projects, people, tasks
+
+
+def find_contract_for_project(project, contracts):
+    project_code = str(project.get("Code", "")).strip()
+    project_name = str(project.get("Name", "")).strip()
+    project_short_code = str(project.get("Short Code", "")).strip()
+
+    for contract in contracts:
+        contract_projects = str(contract.get("Projects", "")).strip()
+        contract_code = str(contract.get("Contract", "")).strip()
+        contract_short_code = str(contract.get("Short Code", "")).strip()
+
+        if project_code and project_code in contract_projects:
+            return contract
+
+        if project_name and project_name in contract_projects:
+            return contract
+
+        if project_short_code and project_short_code == contract_short_code:
+            return contract
+
+        if project_code and project_code == contract_code:
+            return contract
+
+    return {}
+
+
+def get_contract_key(contract):
+    contract_number = clean_value(contract.get("Contract"))
+    short_code = clean_value(contract.get("Short Code"))
+
+    if contract_number:
+        return f"contract::{contract_number}"
+
+    if short_code:
+        return f"short::{short_code}"
+
+    return "contract::unmatched"
 
 
 def get_source_table(row_context, source):
@@ -199,6 +251,9 @@ def get_source_table(row_context, source):
     if source in ("airtable - tasks", "tasks"):
         return row_context["task"]
 
+    if source in ("airtable - contracts", "contracts"):
+        return row_context["contract"]
+
     return {}
 
 
@@ -207,13 +262,11 @@ def extract(row_context, mapping_row):
     field = (mapping_row.get("field") or "").strip()
     value = mapping_row.get("value")
 
-    # Only rows marked constant use the literal Value column.
     if source.lower() == "constant":
         return clean_value(value)
 
     source_table = get_source_table(row_context, source)
 
-    # Special mapping rules from your Mapping table.
     if field == "Spent Date":
         return format_workdate(row_context["time"].get("Spent Date"))
 
@@ -234,18 +287,29 @@ def extract(row_context, mapping_row):
             or row_context["person"].get("Craft1")
         )
 
-    # Normal table-field lookup.
     if source_table and field:
         return clean_value(source_table.get(field))
 
     return ""
 
 
-def write_csv(rows):
+def get_csv_preamble_name(from_date, to_date, contract):
+    date_name = format_lem_date_name(from_date, to_date)
+    short_code = clean_value(contract.get("Short Code"))
+
+    if short_code:
+        return f"{date_name}.{short_code}"
+
+    return date_name
+
+
+def write_contract_csv(rows, from_date, to_date, contract):
     if not rows:
         raise HTTPException(status_code=422, detail="No LEM rows were generated")
 
     headers = list(rows[0].keys())
+    preamble_name = get_csv_preamble_name(from_date, to_date, contract)
+    contract_number = clean_value(contract.get("Contract"))
 
     temp_file = tempfile.NamedTemporaryFile(
         delete=False,
@@ -256,19 +320,41 @@ def write_csv(rows):
     )
 
     with temp_file:
-        writer = csv.DictWriter(temp_file, fieldnames=headers)
-        writer.writeheader()
-        writer.writerows(rows)
+        writer = csv.writer(temp_file)
+
+        writer.writerow([
+            "CNRLEMLINE",
+            preamble_name,
+            contract_number,
+            "O",
+        ])
+
+        writer.writerow(headers)
+
+        dict_writer = csv.DictWriter(temp_file, fieldnames=headers)
+        dict_writer.writerows(rows)
 
     return temp_file.name
+
+
+def write_zip(csv_files):
+    temp_zip = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
+    temp_zip.close()
+
+    with zipfile.ZipFile(temp_zip.name, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for csv_file in csv_files:
+            zip_file.write(csv_file["path"], arcname=csv_file["filename"])
+
+    return temp_zip.name
 
 
 def generate_lem(payload):
     mapping = load_mapping()
     time_entries = load_time_entries(payload.from_date, payload.to_date)
+    contracts = load_contracts()
     projects, people, tasks = hydrate(time_entries)
 
-    rows = []
+    grouped_rows = {}
 
     for record in time_entries:
         fields = record.get("fields", {})
@@ -277,11 +363,19 @@ def generate_lem(payload):
         person_id = first_link(fields.get("Person"))
         task_id = first_link(fields.get("Task"))
 
+        project = projects.get(project_id, {})
+        person = people.get(person_id, {})
+        task = tasks.get(task_id, {})
+        contract = find_contract_for_project(project, contracts)
+
+        contract_key = get_contract_key(contract)
+
         row_context = {
             "time": fields,
-            "project": projects.get(project_id, {}),
-            "person": people.get(person_id, {}),
-            "task": tasks.get(task_id, {}),
+            "project": project,
+            "person": person,
+            "task": task,
+            "contract": contract,
         }
 
         output_row = {}
@@ -294,6 +388,36 @@ def generate_lem(payload):
 
             output_row[lem_field] = extract(row_context, mapping_row)
 
-        rows.append(output_row)
+        if contract_key not in grouped_rows:
+            grouped_rows[contract_key] = {
+                "contract": contract,
+                "rows": [],
+            }
 
-    return write_csv(rows)
+        grouped_rows[contract_key]["rows"].append(output_row)
+
+    if not grouped_rows:
+        raise HTTPException(status_code=422, detail="No LEM rows were generated")
+
+    csv_files = []
+
+    for group in grouped_rows.values():
+        contract = group["contract"]
+        rows = group["rows"]
+
+        preamble_name = get_csv_preamble_name(payload.from_date, payload.to_date, contract)
+        filename = f"{safe_filename(preamble_name)}.csv"
+
+        csv_path = write_contract_csv(
+            rows,
+            payload.from_date,
+            payload.to_date,
+            contract,
+        )
+
+        csv_files.append({
+            "path": csv_path,
+            "filename": filename,
+        })
+
+    return write_zip(csv_files)
