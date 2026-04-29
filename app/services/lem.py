@@ -1,85 +1,111 @@
 import os
+from typing import Any, Dict, List, Optional
+
 import requests
-from typing import Any, Dict, List
+from fastapi import HTTPException
+
 
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID", "appoW4AxlO3Gkezr4")
+AIRTABLE_API_ROOT = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}"
 
-
-def airtable_headers():
-    api_key = os.getenv("AIRTABLE_API_KEY")
-    if not api_key:
-        raise Exception("Missing AIRTABLE_API_KEY")
-    return {"Authorization": f"Bearer {api_key}"}
-
-
-def airtable_list(table_id: str):
-    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_id}"
-    records = []
-
-    while url:
-        res = requests.get(url, headers=airtable_headers())
-        res.raise_for_status()
-        data = res.json()
-
-        records.extend(data.get("records", []))
-
-        offset = data.get("offset")
-        if offset:
-            url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_id}?offset={offset}"
-        else:
-            url = None
-
-    return records
-
-
-# ================================
-# TABLE IDs
-# ================================
 
 TABLES = {
     "mapping": "tblRFhOeKAkRcYP7x",
     "time_entries": "tblHStBhBeiBKAyDi",
-    "projects": "tblDSMSWBOtotSwEX",
-    "people": "tblr5TZn5JPgcLPdd",
-    "tasks": "tblrzzJqP5fNH2lOn",
 }
 
 
-# ================================
-# STEP 1: LOAD MAPPING
-# ================================
+def airtable_headers() -> Dict[str, str]:
+    api_key = os.getenv("AIRTABLE_API_KEY")
 
-def load_mapping():
-    records = airtable_list(TABLES["mapping"])
+    if not api_key:
+        raise HTTPException(
+            status_code=500,
+            detail="Missing AIRTABLE_API_KEY",
+        )
 
-    mapping = []
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
 
-    for r in records:
-        f = r["fields"]
+
+def airtable_list_records(
+    table_id: str,
+    *,
+    field_ids: Optional[List[str]] = None,
+    formula: Optional[str] = None,
+    page_size: int = 100,
+) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+    offset: Optional[str] = None
+
+    while True:
+        params: Dict[str, Any] = {"pageSize": page_size}
+
+        if field_ids:
+            params["fields[]"] = field_ids
+
+        if formula:
+            params["filterByFormula"] = formula
+
+        if offset:
+            params["offset"] = offset
+
+        url = f"{AIRTABLE_API_ROOT}/{table_id}"
+
+        response = requests.get(
+            url,
+            headers=airtable_headers(),
+            params=params,
+            timeout=60,
+        )
+
+        if response.status_code >= 400:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "message": "Airtable read failed",
+                    "table_id": table_id,
+                    "status_code": response.status_code,
+                    "response": response.text,
+                },
+            )
+
+        data = response.json()
+        records.extend(data.get("records", []))
+
+        offset = data.get("offset")
+        if not offset:
+            break
+
+    return records
+
+
+def load_mapping() -> List[Dict[str, Any]]:
+    records = airtable_list_records(TABLES["mapping"])
+
+    mapping: List[Dict[str, Any]] = []
+
+    for record in records:
+        fields = record.get("fields", {})
 
         mapping.append({
-            "index": f.get("Index", 999),
-            "source": f.get("Source"),
-            "field": f.get("Field"),
-            "value": f.get("Value"),
-            "lem_field": f.get("LEM Field"),
-            "report_field": f.get("Report Field"),
+            "record_id": record.get("id"),
+            "index": fields.get("Index", 9999),
+            "source": fields.get("Source", ""),
+            "field": fields.get("Field", ""),
+            "value": fields.get("Value", ""),
+            "lem_field": fields.get("LEM Field", ""),
+            "report_field": fields.get("Report Field", ""),
         })
 
-    return sorted(mapping, key=lambda x: x["index"])
+    return sorted(mapping, key=lambda row: row["index"])
 
 
-# ================================
-# STEP 2: LOAD TIME ENTRIES
-# ================================
+def load_time_entries() -> List[Dict[str, Any]]:
+    return airtable_list_records(TABLES["time_entries"])
 
-def load_time_entries():
-    return airtable_list(TABLES["time_entries"])
-
-
-# ================================
-# STEP 3: DEBUG OUTPUT
-# ================================
 
 def generate_lem(payload):
     mapping = load_mapping()
@@ -87,8 +113,11 @@ def generate_lem(payload):
 
     return {
         "status": "mapping_loaded",
+        "message": "LEM service loaded Mapping table and Time Entries successfully.",
+        "from_date": payload.from_date,
+        "to_date": payload.to_date,
         "mapping_count": len(mapping),
         "time_entries_count": len(time_entries),
-        "mapping_preview": mapping[:5],
+        "mapping_preview": mapping[:10],
         "time_entries_preview": time_entries[:3],
     }
