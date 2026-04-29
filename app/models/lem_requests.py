@@ -14,3 +14,6 @@ class LemGenerateRequest(BaseModel):
     include_pdf: bool = True
 
     force_sync_time_entries: bool = True
+
+    approved_only: bool = False
+    billable_only: bool = False
