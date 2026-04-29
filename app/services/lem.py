@@ -1,10 +1,12 @@
-import os
 import csv
+import json
+import os
 import re
+import subprocess
 import tempfile
 import zipfile
-from datetime import datetime
-from typing import Any
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import requests
 from fastapi import HTTPException
@@ -15,7 +17,6 @@ AIRTABLE_API_ROOT = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}"
 
 
 TABLES = {
-    "mapping": "tblRFhOeKAkRcYP7x",
     "time_entries": "tblHStBhBeiBKAyDi",
     "projects": "tblDSMSWBOtotSwEX",
     "people": "tblr5TZn5JPgcLPdd",
@@ -24,21 +25,31 @@ TABLES = {
 }
 
 
-def airtable_headers():
+MAKE_LEM_SCRIPT = os.getenv("MAKE_LEM_SCRIPT", "make_lem.py")
+REPORT_TEMPLATE = os.getenv("REPORT_TEMPLATE", "report_template.xlsx")
+
+
+def airtable_headers() -> Dict[str, str]:
     api_key = os.getenv("AIRTABLE_API_KEY")
     if not api_key:
         raise HTTPException(status_code=500, detail="Missing AIRTABLE_API_KEY")
-    return {"Authorization": f"Bearer {api_key}"}
+
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
 
 
-def airtable_list_records(table_id, formula=None):
-    records = []
-    offset = None
+def airtable_list_records(table_id: str, formula: Optional[str] = None) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+    offset: Optional[str] = None
 
     while True:
-        params = {"pageSize": 100}
+        params: Dict[str, Any] = {"pageSize": 100}
+
         if formula:
             params["filterByFormula"] = formula
+
         if offset:
             params["offset"] = offset
 
@@ -62,23 +73,25 @@ def airtable_list_records(table_id, formula=None):
 
         data = response.json()
         records.extend(data.get("records", []))
-        offset = data.get("offset")
 
+        offset = data.get("offset")
         if not offset:
             break
 
     return records
 
 
-def airtable_get_by_ids(table_id, ids):
-    ids = [x for x in ids if x]
+def airtable_get_by_ids(table_id: str, ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    ids = [record_id for record_id in ids if record_id]
+
     if not ids:
         return {}
 
-    output = {}
+    output: Dict[str, Dict[str, Any]] = {}
 
     for i in range(0, len(ids), 20):
         chunk = ids[i:i + 20]
+
         formula = "OR(" + ",".join(
             [f"RECORD_ID()='{record_id}'" for record_id in chunk]
         ) + ")"
@@ -91,78 +104,30 @@ def airtable_get_by_ids(table_id, ids):
     return output
 
 
-def first_link(value):
+def first_link(value: Any) -> Optional[str]:
     if isinstance(value, list) and value:
         return value[0]
     return None
 
 
-def clean_value(value: Any):
+def clean_value(value: Any) -> str:
     if isinstance(value, list):
         if not value:
             return ""
         if len(value) == 1:
             return clean_value(value[0])
-        return ", ".join(str(clean_value(v)) for v in value)
+        return ", ".join(clean_value(v) for v in value)
 
     if isinstance(value, dict):
-        return value.get("name") or value.get("id") or str(value)
+        return str(value.get("name") or value.get("id") or "")
 
     if value is None:
         return ""
 
-    return value
+    return str(value).strip()
 
 
-def safe_filename(value):
-    text = str(value or "").strip()
-    text = re.sub(r"[^\w.\- ]+", "", text)
-    text = text.replace(" ", "_")
-    return text or "LEM"
-
-
-def format_workdate(value):
-    if not value:
-        return ""
-
-    try:
-        return datetime.fromisoformat(str(value)).strftime("%m/%d/%Y")
-    except ValueError:
-        return value
-
-
-def format_lem_date_name(from_date, to_date):
-    start = datetime.fromisoformat(from_date)
-    end = datetime.fromisoformat(to_date)
-    return f"{start:%m.%d}-{end:%d.%Y}"
-
-
-def extract_wo(task_value, notes_value):
-    text = f"{task_value or ''} {notes_value or ''}"
-    match = re.search(r"WO[-\s:]?(\d+)", text, flags=re.IGNORECASE)
-    return match.group(1) if match else ""
-
-
-def load_mapping():
-    records = airtable_list_records(TABLES["mapping"])
-    mapping = []
-
-    for record in records:
-        fields = record.get("fields", {})
-
-        mapping.append({
-            "index": fields.get("Index", 9999),
-            "source": fields.get("Source", ""),
-            "field": fields.get("Field", ""),
-            "value": fields.get("Value", ""),
-            "lem_field": fields.get("LEM Field", ""),
-            "report_field": fields.get("Report Field", ""),
-        })
-
-    return sorted(mapping, key=lambda row: row["index"])
-
-
-def load_time_entries(from_date, to_date):
+def load_time_entries(from_date: str, to_date: str) -> List[Dict[str, Any]]:
     formula = (
         "AND("
         f"IS_AFTER({{Spent Date}}, DATEADD('{from_date}', -1, 'days')), "
@@ -173,17 +138,21 @@ def load_time_entries(from_date, to_date):
     return airtable_list_records(TABLES["time_entries"], formula=formula)
 
 
-def load_contracts():
-    return [record.get("fields", {}) for record in airtable_list_records(TABLES["contracts"])]
+def load_contracts() -> List[Dict[str, Any]]:
+    return [
+        record.get("fields", {})
+        for record in airtable_list_records(TABLES["contracts"])
+    ]
 
 
-def hydrate(time_entries):
+def hydrate(time_entries: List[Dict[str, Any]]):
     project_ids = set()
     person_ids = set()
     task_ids = set()
 
     for record in time_entries:
         fields = record.get("fields", {})
+
         project_ids.add(first_link(fields.get("Project")))
         person_ids.add(first_link(fields.get("Person")))
         task_ids.add(first_link(fields.get("Task")))
@@ -195,15 +164,15 @@ def hydrate(time_entries):
     return projects, people, tasks
 
 
-def find_contract_for_project(project, contracts):
-    project_code = str(project.get("Code", "")).strip()
-    project_name = str(project.get("Name", "")).strip()
-    project_short_code = str(project.get("Short Code", "")).strip()
+def find_contract_for_project(project: Dict[str, Any], contracts: List[Dict[str, Any]]) -> Dict[str, Any]:
+    project_code = clean_value(project.get("Code"))
+    project_name = clean_value(project.get("Name"))
+    project_short_code = clean_value(project.get("Short Code"))
 
     for contract in contracts:
-        contract_projects = str(contract.get("Projects", "")).strip()
-        contract_code = str(contract.get("Contract", "")).strip()
-        contract_short_code = str(contract.get("Short Code", "")).strip()
+        contract_projects = clean_value(contract.get("Projects"))
+        contract_number = clean_value(contract.get("Contract"))
+        contract_short_code = clean_value(contract.get("Short Code"))
 
         if project_code and project_code in contract_projects:
             return contract
@@ -214,147 +183,31 @@ def find_contract_for_project(project, contracts):
         if project_short_code and project_short_code == contract_short_code:
             return contract
 
-        if project_code and project_code == contract_code:
+        if project_code and project_code == contract_number:
             return contract
 
     return {}
 
 
-def get_contract_key(contract):
-    contract_number = clean_value(contract.get("Contract"))
-    short_code = clean_value(contract.get("Short Code"))
+def split_first_last_from_full_name(full_name: str) -> tuple[str, str]:
+    parts = full_name.strip().split()
 
-    if contract_number:
-        return f"contract::{contract_number}"
+    if not parts:
+        return "", ""
 
-    if short_code:
-        return f"short::{short_code}"
+    if len(parts) == 1:
+        return parts[0], ""
 
-    return "contract::unmatched"
-
-
-def get_source_table(row_context, source):
-    source = (source or "").strip().lower()
-
-    if source == "constant":
-        return None
-
-    if source in ("airtable - time entries", "time entries"):
-        return row_context["time"]
-
-    if source in ("airtable - projects", "projects"):
-        return row_context["project"]
-
-    if source in ("airtable - people", "people"):
-        return row_context["person"]
-
-    if source in ("airtable - tasks", "tasks"):
-        return row_context["task"]
-
-    if source in ("airtable - contracts", "contracts"):
-        return row_context["contract"]
-
-    return {}
+    return parts[0], " ".join(parts[1:])
 
 
-def extract(row_context, mapping_row):
-    source = (mapping_row.get("source") or "").strip()
-    field = (mapping_row.get("field") or "").strip()
-    value = mapping_row.get("value")
-
-    if source.lower() == "constant":
-        return clean_value(value)
-
-    source_table = get_source_table(row_context, source)
-
-    if field == "Spent Date":
-        return format_workdate(row_context["time"].get("Spent Date"))
-
-    if field == "Task/Notes":
-        task_name = row_context["task"].get("Name")
-        notes = row_context["time"].get("Notes")
-        return extract_wo(task_name, notes)
-
-    if field == "Task":
-        return clean_value(row_context["task"].get("Name"))
-
-    if field == "Person":
-        return clean_value(row_context["person"].get("Full Name"))
-
-    if field in ("Craft Code 1/Craft Code 2/Craft Code 3", "Craft"):
-        return clean_value(
-            row_context["person"].get("Description (from Craft1)")
-            or row_context["person"].get("Craft1")
-        )
-
-    if source_table and field:
-        return clean_value(source_table.get(field))
-
-    return ""
-
-
-def get_csv_preamble_name(from_date, to_date, contract):
-    date_name = format_lem_date_name(from_date, to_date)
-    short_code = clean_value(contract.get("Short Code"))
-
-    if short_code:
-        return f"{date_name}.{short_code}"
-
-    return date_name
-
-
-def write_contract_csv(rows, from_date, to_date, contract):
-    if not rows:
-        raise HTTPException(status_code=422, detail="No LEM rows were generated")
-
-    headers = list(rows[0].keys())
-    preamble_name = get_csv_preamble_name(from_date, to_date, contract)
-    contract_number = clean_value(contract.get("Contract"))
-
-    temp_file = tempfile.NamedTemporaryFile(
-        delete=False,
-        suffix=".csv",
-        mode="w",
-        newline="",
-        encoding="utf-8",
-    )
-
-    with temp_file:
-        writer = csv.writer(temp_file)
-
-        writer.writerow([
-            "CNRLEMLINE",
-            preamble_name,
-            contract_number,
-            "O",
-        ])
-
-        writer.writerow(headers)
-
-        dict_writer = csv.DictWriter(temp_file, fieldnames=headers)
-        dict_writer.writerows(rows)
-
-    return temp_file.name
-
-
-def write_zip(csv_files):
-    temp_zip = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
-    temp_zip.close()
-
-    with zipfile.ZipFile(temp_zip.name, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        for csv_file in csv_files:
-            zip_file.write(csv_file["path"], arcname=csv_file["filename"])
-
-    return temp_zip.name
-
-
-def generate_lem(payload):
-    mapping = load_mapping()
-    time_entries = load_time_entries(payload.from_date, payload.to_date)
-    contracts = load_contracts()
-    projects, people, tasks = hydrate(time_entries)
-
-    grouped_rows = {}
+def make_staging_timesheet(
+    time_entries: List[Dict[str, Any]],
+    projects: Dict[str, Dict[str, Any]],
+    people: Dict[str, Dict[str, Any]],
+    tasks: Dict[str, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
 
     for record in time_entries:
         fields = record.get("fields", {})
@@ -366,58 +219,238 @@ def generate_lem(payload):
         project = projects.get(project_id, {})
         person = people.get(person_id, {})
         task = tasks.get(task_id, {})
-        contract = find_contract_for_project(project, contracts)
 
-        contract_key = get_contract_key(contract)
+        first_name = clean_value(person.get("First Name"))
+        last_name = clean_value(person.get("Last Name"))
 
-        row_context = {
-            "time": fields,
-            "project": project,
-            "person": person,
-            "task": task,
-            "contract": contract,
-        }
+        if not first_name and not last_name:
+            first_name, last_name = split_first_last_from_full_name(
+                clean_value(person.get("Full Name"))
+            )
 
-        output_row = {}
-
-        for mapping_row in mapping:
-            lem_field = mapping_row.get("lem_field")
-
-            if not lem_field:
-                continue
-
-            output_row[lem_field] = extract(row_context, mapping_row)
-
-        if contract_key not in grouped_rows:
-            grouped_rows[contract_key] = {
-                "contract": contract,
-                "rows": [],
-            }
-
-        grouped_rows[contract_key]["rows"].append(output_row)
-
-    if not grouped_rows:
-        raise HTTPException(status_code=422, detail="No LEM rows were generated")
-
-    csv_files = []
-
-    for group in grouped_rows.values():
-        contract = group["contract"]
-        rows = group["rows"]
-
-        preamble_name = get_csv_preamble_name(payload.from_date, payload.to_date, contract)
-        filename = f"{safe_filename(preamble_name)}.csv"
-
-        csv_path = write_contract_csv(
-            rows,
-            payload.from_date,
-            payload.to_date,
-            contract,
-        )
-
-        csv_files.append({
-            "path": csv_path,
-            "filename": filename,
+        rows.append({
+            "Project Code": clean_value(project.get("Code")),
+            "Employee Id": clean_value(person.get("Harvest User ID")),
+            "First Name": first_name,
+            "Last Name": last_name,
+            "Date": clean_value(fields.get("Spent Date")),
+            "Hours": clean_value(fields.get("Hours")),
+            "Task": clean_value(task.get("Name")),
+            "Notes": clean_value(fields.get("Notes")),
         })
 
-    return write_zip(csv_files)
+    return rows
+
+
+def make_airtable_json(
+    time_entries: List[Dict[str, Any]],
+    projects: Dict[str, Dict[str, Any]],
+    people: Dict[str, Dict[str, Any]],
+    contracts: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    project_items: Dict[str, Dict[str, Any]] = {}
+    project_billing_items: Dict[str, Dict[str, Any]] = {}
+    people_items: Dict[str, Dict[str, Any]] = {}
+
+    for record in time_entries:
+        fields = record.get("fields", {})
+
+        project_id = first_link(fields.get("Project"))
+        person_id = first_link(fields.get("Person"))
+
+        project = projects.get(project_id, {})
+        person = people.get(person_id, {})
+        contract = find_contract_for_project(project, contracts)
+
+        project_code = clean_value(project.get("Code"))
+        if project_code:
+            approver_name = clean_value(project.get("Approver"))
+            approver_first, approver_last = split_first_last_from_full_name(approver_name)
+
+            project_items[project_code] = {
+                "Project Code": project_code,
+                "Project": clean_value(project.get("Name")),
+                "Billing Type": clean_value(project.get("Billing Type") or project.get("Invoice Type") or "LEM"),
+                "Approver First Name": approver_first,
+                "Approver Last Name": approver_last,
+                "Approver Email": clean_value(project.get("Email (from Approver)")),
+                "Contracts": clean_value(contract.get("Contract")),
+                "Short Code": clean_value(contract.get("Short Code") or project.get("Short Code")),
+            }
+
+            project_billing_items[project_code] = {
+                "Project Code": project_code,
+                "Billing Method": normalize_billing_method(
+                    clean_value(project.get("Billing Method"))
+                ),
+            }
+
+        first_name = clean_value(person.get("First Name"))
+        last_name = clean_value(person.get("Last Name"))
+
+        if not first_name and not last_name:
+            first_name, last_name = split_first_last_from_full_name(
+                clean_value(person.get("Full Name"))
+            )
+
+        person_key = f"{first_name} {last_name}".strip()
+
+        if person_key:
+            people_items[person_key] = {
+                "First Name": first_name,
+                "Last Name": last_name,
+                "Craft Code 1": clean_value(
+                    person.get("Description (from Craft1)")
+                    or person.get("Craft1")
+                ),
+                "Craft Code 2": clean_value(
+                    person.get("Description (from Craft2)")
+                    or person.get("Craft2")
+                ),
+                "Craft Code 3": clean_value(
+                    person.get("Description (from Craft3)")
+                    or person.get("Craft3")
+                ),
+            }
+
+    return {
+        "projects": list(project_items.values()),
+        "project_billing": list(project_billing_items.values()),
+        "people": list(people_items.values()),
+    }
+
+
+def normalize_billing_method(value: str) -> str:
+    text = value.strip().lower()
+
+    if "craft code 2" in text or text == "craft 2":
+        return "Craft 2"
+
+    if "craft code 3" in text or text == "craft 3":
+        return "Craft 3"
+
+    return "Craft 1"
+
+
+def write_staging_csv(rows: List[Dict[str, Any]], path: Path) -> None:
+    headers = [
+        "Project Code",
+        "Employee Id",
+        "First Name",
+        "Last Name",
+        "Date",
+        "Hours",
+        "Task",
+        "Notes",
+    ]
+
+    with path.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=headers)
+        writer.writeheader()
+
+        for row in rows:
+            writer.writerow({header: row.get(header, "") for header in headers})
+
+
+def write_airtable_json(payload: Dict[str, Any], path: Path) -> None:
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def find_existing_path(candidates: List[str]) -> Optional[Path]:
+    for candidate in candidates:
+        path = Path(candidate)
+        if path.exists():
+            return path
+    return None
+
+
+def run_make_lem(staging_csv: Path, airtable_json: Path, output_dir: Path) -> None:
+    script_path = find_existing_path([
+        MAKE_LEM_SCRIPT,
+        "app/services/make_lem.py",
+        "make_lem.py",
+    ])
+
+    if not script_path:
+        raise HTTPException(
+            status_code=500,
+            detail="make_lem.py not found. Place it at repo root or app/services/make_lem.py",
+        )
+
+    command = [
+        "python",
+        str(script_path),
+        "--timesheet",
+        str(staging_csv),
+        "--airtable-json",
+        str(airtable_json),
+        "--output-dir",
+        str(output_dir),
+    ]
+
+    template_path = find_existing_path([
+        REPORT_TEMPLATE,
+        "report_template.xlsx",
+        "app/services/report_template.xlsx",
+    ])
+
+    if template_path:
+        command.extend(["--template", str(template_path)])
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+
+    if result.returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "make_lem.py failed",
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+            },
+        )
+
+
+def zip_output_dir(output_dir: Path) -> Path:
+    zip_path = output_dir.parent / "lem_outputs.zip"
+
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for path in output_dir.rglob("*"):
+            if path.is_file():
+                zip_file.write(path, arcname=path.relative_to(output_dir))
+
+    return zip_path
+
+
+def generate_lem(payload):
+    work_dir = Path(tempfile.mkdtemp(prefix="lem_"))
+    output_dir = work_dir / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    staging_csv = work_dir / "staging_timesheet.csv"
+    airtable_json_path = work_dir / "airtable.json"
+
+    time_entries = load_time_entries(payload.from_date, payload.to_date)
+
+    if not time_entries:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No time entries found from {payload.from_date} to {payload.to_date}",
+        )
+
+    contracts = load_contracts()
+    projects, people, tasks = hydrate(time_entries)
+
+    staging_rows = make_staging_timesheet(time_entries, projects, people, tasks)
+    airtable_payload = make_airtable_json(time_entries, projects, people, contracts)
+
+    write_staging_csv(staging_rows, staging_csv)
+    write_airtable_json(airtable_payload, airtable_json_path)
+
+    run_make_lem(staging_csv, airtable_json_path, output_dir)
+
+    return str(zip_output_dir(output_dir))
