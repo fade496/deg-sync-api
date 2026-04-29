@@ -20,14 +20,11 @@ TABLES = {
 }
 
 
-# ----------------------------
-# Airtable helpers
-# ----------------------------
-
 def airtable_headers():
     api_key = os.getenv("AIRTABLE_API_KEY")
     if not api_key:
         raise HTTPException(status_code=500, detail="Missing AIRTABLE_API_KEY")
+
     return {"Authorization": f"Bearer {api_key}"}
 
 
@@ -37,24 +34,35 @@ def airtable_list_records(table_id, formula=None):
 
     while True:
         params = {"pageSize": 100}
+
         if formula:
             params["filterByFormula"] = formula
+
         if offset:
             params["offset"] = offset
 
-        r = requests.get(
+        response = requests.get(
             f"{AIRTABLE_API_ROOT}/{table_id}",
             headers=airtable_headers(),
             params=params,
+            timeout=60,
         )
 
-        if r.status_code >= 400:
-            raise HTTPException(status_code=500, detail=r.text)
+        if response.status_code >= 400:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "message": "Airtable read failed",
+                    "table_id": table_id,
+                    "status_code": response.status_code,
+                    "response": response.text,
+                },
+            )
 
-        data = r.json()
+        data = response.json()
         records.extend(data.get("records", []))
-        offset = data.get("offset")
 
+        offset = data.get("offset")
         if not offset:
             break
 
@@ -62,48 +70,52 @@ def airtable_list_records(table_id, formula=None):
 
 
 def airtable_get_by_ids(table_id, ids):
+    ids = [x for x in ids if x]
+
     if not ids:
         return {}
 
-    out = {}
+    output = {}
 
     for i in range(0, len(ids), 20):
         chunk = ids[i:i + 20]
 
-        formula = "OR(" + ",".join([f"RECORD_ID()='{x}'" for x in chunk]) + ")"
+        formula = "OR(" + ",".join(
+            [f"RECORD_ID()='{record_id}'" for record_id in chunk]
+        ) + ")"
 
-        recs = airtable_list_records(table_id, formula)
+        records = airtable_list_records(table_id, formula=formula)
 
-        for r in recs:
-            out[r["id"]] = r["fields"]
+        for record in records:
+            output[record["id"]] = record.get("fields", {})
 
-    return out
+    return output
 
 
-# ----------------------------
-# Core helpers
-# ----------------------------
-
-def first_link(v):
-    return v[0] if isinstance(v, list) and v else None
+def first_link(value):
+    if isinstance(value, list) and value:
+        return value[0]
+    return None
 
 
 def load_mapping():
-    recs = airtable_list_records(TABLES["mapping"])
+    records = airtable_list_records(TABLES["mapping"])
 
     mapping = []
-    for r in recs:
-        f = r["fields"]
+
+    for record in records:
+        fields = record.get("fields", {})
 
         mapping.append({
-            "index": f.get("Index", 9999),
-            "source": f.get("Source"),
-            "field": f.get("Field"),
-            "value": f.get("Value"),
-            "lem_field": f.get("LEM Field"),
+            "index": fields.get("Index", 9999),
+            "source": fields.get("Source"),
+            "field": fields.get("Field"),
+            "value": fields.get("Value"),
+            "lem_field": fields.get("LEM Field"),
+            "report_field": fields.get("Report Field"),
         })
 
-    return sorted(mapping, key=lambda x: x["index"])
+    return sorted(mapping, key=lambda row: row["index"])
 
 
 def load_time_entries(from_date, to_date):
@@ -114,71 +126,75 @@ def load_time_entries(from_date, to_date):
         ")"
     )
 
-    return airtable_list_records(TABLES["time_entries"], formula)
+    return airtable_list_records(TABLES["time_entries"], formula=formula)
 
 
 def hydrate(time_entries):
-    p_ids, u_ids, t_ids = set(), set(), set()
+    project_ids = set()
+    person_ids = set()
+    task_ids = set()
 
-    for r in time_entries:
-        f = r["fields"]
-        p_ids.add(first_link(f.get("Project")))
-        u_ids.add(first_link(f.get("Person")))
-        t_ids.add(first_link(f.get("Task")))
+    for record in time_entries:
+        fields = record.get("fields", {})
 
-    return (
-        airtable_get_by_ids(TABLES["projects"], list(p_ids)),
-        airtable_get_by_ids(TABLES["people"], list(u_ids)),
-        airtable_get_by_ids(TABLES["tasks"], list(t_ids)),
-    )
+        project_ids.add(first_link(fields.get("Project")))
+        person_ids.add(first_link(fields.get("Person")))
+        task_ids.add(first_link(fields.get("Task")))
+
+    projects = airtable_get_by_ids(TABLES["projects"], list(project_ids))
+    people = airtable_get_by_ids(TABLES["people"], list(person_ids))
+    tasks = airtable_get_by_ids(TABLES["tasks"], list(task_ids))
+
+    return projects, people, tasks
 
 
-# ----------------------------
-# Mapping engine
-# ----------------------------
+def extract(row, mapping_row):
+    value = mapping_row.get("value")
+    if value:
+        return value
 
-def extract(row, m):
-    if m["value"]:
-        return m["value"]
+    source = mapping_row.get("source")
+    field = mapping_row.get("field")
 
-    src = m["source"]
-    fld = m["field"]
+    if source in ("Airtable - Time Entries", "Time Entries"):
+        return row["time"].get(field)
 
-    if src == "Time Entries":
-        return row["time"].get(fld)
-    if src == "Projects":
-        return row["project"].get(fld)
-    if src == "People":
-        return row["person"].get(fld)
-    if src == "Tasks":
-        return row["task"].get(fld)
+    if source in ("Airtable - Projects", "Projects"):
+        return row["project"].get(field)
+
+    if source in ("Airtable - People", "People"):
+        return row["person"].get(field)
+
+    if source in ("Airtable - Tasks", "Tasks"):
+        return row["task"].get(field)
+
+    if source == "constant":
+        return value
 
     return None
 
 
-# ----------------------------
-# CSV Writer
-# ----------------------------
-
 def write_csv(rows):
     if not rows:
-        return None
-
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".csv")
+        raise HTTPException(status_code=422, detail="No LEM rows were generated")
 
     headers = list(rows[0].keys())
 
-    with open(tmp.name, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=headers)
+    temp_file = tempfile.NamedTemporaryFile(
+        delete=False,
+        suffix=".csv",
+        mode="w",
+        newline="",
+        encoding="utf-8",
+    )
+
+    with temp_file:
+        writer = csv.DictWriter(temp_file, fieldnames=headers)
         writer.writeheader()
         writer.writerows(rows)
 
-    return tmp.name
+    return temp_file.name
 
-
-# ----------------------------
-# MAIN
-# ----------------------------
 
 def generate_lem(payload):
     mapping = load_mapping()
@@ -188,30 +204,30 @@ def generate_lem(payload):
 
     rows = []
 
-    for r in time_entries:
-        f = r["fields"]
+    for record in time_entries:
+        fields = record.get("fields", {})
 
-        row = {
-            "time": f,
-            "project": projects.get(first_link(f.get("Project")), {}),
-            "person": people.get(first_link(f.get("Person")), {}),
-            "task": tasks.get(first_link(f.get("Task")), {}),
+        project_id = first_link(fields.get("Project"))
+        person_id = first_link(fields.get("Person"))
+        task_id = first_link(fields.get("Task"))
+
+        row_context = {
+            "time": fields,
+            "project": projects.get(project_id, {}),
+            "person": people.get(person_id, {}),
+            "task": tasks.get(task_id, {}),
         }
 
-        out = {}
+        output_row = {}
 
-        for m in mapping:
-            if not m["lem_field"]:
+        for mapping_row in mapping:
+            lem_field = mapping_row.get("lem_field")
+
+            if not lem_field:
                 continue
 
-            out[m["lem_field"]] = extract(row, m)
+            output_row[lem_field] = extract(row_context, mapping_row)
 
-        rows.append(out)
+        rows.append(output_row)
 
-    csv_path = write_csv(rows)
-
-    return {
-        "status": "csv_generated",
-        "row_count": len(rows),
-        "file_path": csv_path,
-    }
+    return write_csv(rows)
