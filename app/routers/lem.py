@@ -15,10 +15,10 @@ def ping():
 
 @router.post("/generate")
 def generate(payload: LemGenerateRequest):
-    csv_path = generate_lem(payload)
+    zip_path = generate_lem(payload)
 
     return FileResponse(
-        path=csv_path,
-        filename="lem_output.csv",
-        media_type="text/csv",
+        path=zip_path,
+        filename="lem_outputs.zip",
+        media_type="application/zip",
     )
