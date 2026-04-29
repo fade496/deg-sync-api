@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from app.routers import lem
+from app.routers.lem import router as lem_router
 
 app = FastAPI()
 
@@ -7,4 +7,4 @@ app = FastAPI()
 def root():
     return {"ok": True}
 
-app.include_router(lem.router)
+app.include_router(lem_router)
