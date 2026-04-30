@@ -220,7 +220,11 @@ def parse_hours(value: Any) -> Optional[float]:
 
 
 def format_hours(value: float) -> str:
-    return f"{int(value)}" if float(value).is_integer() else f"{value:.2f}".rstrip("0").rstrip(".")
+    return (
+        f"{int(value)}"
+        if float(value).is_integer()
+        else f"{value:.2f}".rstrip("0").rstrip(".")
+    )
 
 
 def extract_wo(*values: Any) -> str:
@@ -268,16 +272,10 @@ def load_time_entries(from_date: str, to_date: str) -> List[Dict[str, Any]]:
     return airtable_list_records(TABLES["time_entries"], formula=formula)
 
 
-def load_contracts() -> List[Dict[str, Any]]:
-    return [
-        record.get("fields", {})
-        for record in airtable_list_records(TABLES["contracts"])
-    ]
-
-
 def hydrate(
     time_entries: List[Dict[str, Any]],
 ) -> tuple[
+    Dict[str, Dict[str, Any]],
     Dict[str, Dict[str, Any]],
     Dict[str, Dict[str, Any]],
     Dict[str, Dict[str, Any]],
@@ -287,6 +285,7 @@ def hydrate(
     person_ids = set()
     task_ids = set()
     approver_ids = set()
+    contract_ids = set()
 
     for record in time_entries:
         fields = record.get("fields", {})
@@ -299,44 +298,29 @@ def hydrate(
 
     for project in projects.values():
         approver_ids.add(first_link(project.get("Approver")))
+        contract_ids.add(first_link(project.get("Contracts")))
 
     people = airtable_get_by_ids(TABLES["people"], list(person_ids))
     tasks = airtable_get_by_ids(TABLES["tasks"], list(task_ids))
     approvers = airtable_get_by_ids(TABLES["contacts"], list(approver_ids))
+    contracts = airtable_get_by_ids(TABLES["contracts"], list(contract_ids))
 
-    return projects, people, tasks, approvers
+    return projects, people, tasks, approvers, contracts
 
 
 # =============================================================================
 # Contract / craft / approver logic
 # =============================================================================
 
-def find_contract_for_project(
+def get_contract_for_project(
     project: Dict[str, Any],
-    contracts: List[Dict[str, Any]],
+    contracts_by_id: Dict[str, Dict[str, Any]],
 ) -> Dict[str, Any]:
-    project_code = clean_value(project.get("Code"))
-    project_name = clean_value(project.get("Name"))
-    project_short_code = clean_value(project.get("Short Code"))
+    contract_id = first_link(project.get("Contracts"))
+    if not contract_id:
+        return {}
 
-    for contract in contracts:
-        contract_projects = clean_value(contract.get("Projects"))
-        contract_number = clean_value(contract.get("Contract"))
-        contract_short_code = clean_value(contract.get("Short Code"))
-
-        if project_code and project_code in contract_projects:
-            return contract
-
-        if project_name and project_name in contract_projects:
-            return contract
-
-        if project_short_code and project_short_code == contract_short_code:
-            return contract
-
-        if project_code and project_code == contract_number:
-            return contract
-
-    return {}
+    return contracts_by_id.get(contract_id, {})
 
 
 def normalize_billing_method(value: Any) -> str:
@@ -398,7 +382,11 @@ def get_approver(
         or project.get("Email (from Approver)")
     )
 
-    approver_name = f"{first_name} {last_name}".strip() or full_name or "Unassigned Approver"
+    approver_name = (
+        f"{first_name} {last_name}".strip()
+        or full_name
+        or "Unassigned Approver"
+    )
 
     return {
         "first": first_name,
@@ -418,7 +406,7 @@ def build_normalized_rows(
     people: Dict[str, Dict[str, Any]],
     tasks: Dict[str, Dict[str, Any]],
     approvers: Dict[str, Dict[str, Any]],
-    contracts: List[Dict[str, Any]],
+    contracts: Dict[str, Dict[str, Any]],
 ) -> tuple[List[Dict[str, Any]], List[str]]:
     rows: List[Dict[str, Any]] = []
     errors: List[str] = []
@@ -434,29 +422,48 @@ def build_normalized_rows(
         project = projects.get(project_id, {})
         person = people.get(person_id, {})
         task = tasks.get(task_id, {})
-        contract = find_contract_for_project(project, contracts)
+        contract = get_contract_for_project(project, contracts)
         approver = get_approver(project, approvers)
 
         project_code = clean_value(project.get("Code"))
         project_name = clean_value(project.get("Name"))
-        billing_type = clean_value(project.get("Billing Type") or project.get("Invoice Type") or "LEM")
 
-        if billing_type and billing_type.upper() != "LEM":
+        is_active = bool(project.get("Is Active"))
+        invoice_type = clean_value(project.get("Invoice Type"))
+
+        if not is_active:
+            errors.append(f"{record_id}: skipped inactive project {project_code or project_name}")
+            continue
+
+        if invoice_type.upper() != "LEM":
+            errors.append(
+                f"{record_id}: skipped non-LEM invoice type for project "
+                f"{project_code or project_name}: {invoice_type or 'blank'}"
+            )
             continue
 
         first_name = clean_value(person.get("First Name"))
         last_name = clean_value(person.get("Last Name"))
 
         if not first_name and not last_name:
-            first_name, last_name = split_first_last(clean_value(person.get("Full Name")))
+            first_name, last_name = split_first_last(
+                clean_value(person.get("Full Name"))
+            )
 
-        employee_name = f"{first_name} {last_name}".strip() or clean_value(person.get("Full Name"))
+        employee_name = (
+            f"{first_name} {last_name}".strip()
+            or clean_value(person.get("Full Name"))
+        )
 
         work_date = parse_date(fields.get("Spent Date"))
         hours = parse_hours(fields.get("Hours"))
 
         if not project_code:
             errors.append(f"{record_id}: missing project code")
+            continue
+
+        if not contract:
+            errors.append(f"{record_id}: missing linked contract for project {project_code}")
             continue
 
         if not employee_name:
@@ -479,7 +486,7 @@ def build_normalized_rows(
 
         rows.append({
             "contract": clean_value(contract.get("Contract")),
-            "short_code": clean_value(contract.get("Short Code") or project.get("Short Code")),
+            "short_code": clean_value(contract.get("Short Code")),
             "project_code": project_code,
             "project_name": project_name,
             "billing_method": clean_value(project.get("Billing Method")),
@@ -676,7 +683,11 @@ def draw_pdf_page_decor(
 ) -> None:
     total_hours = sum(row["hours"] for row in rows)
     project_names = sorted({row["project_name"] for row in rows})
-    project_label = project_names[0] if len(project_names) == 1 else "Multiple Projects"
+    project_label = (
+        project_names[0]
+        if len(project_names) == 1
+        else "Multiple Projects"
+    )
 
     report_name = rows[0]["report_name"]
     client = rows[0]["contract"]
@@ -743,7 +754,10 @@ def fit_column_widths(
     raw_widths = []
 
     for col_idx in range(len(DETAIL_HEADERS)):
-        max_width = stringWidth(str(DETAIL_HEADERS[col_idx]), "Helvetica-Bold", 8) + 12
+        max_width = (
+            stringWidth(str(DETAIL_HEADERS[col_idx]), "Helvetica-Bold", 8)
+            + 12
+        )
 
         for row in data[1:]:
             value = row[col_idx]
@@ -823,11 +837,13 @@ def generate_lem(payload) -> str:
     if not time_entries:
         raise HTTPException(
             status_code=404,
-            detail=f"No time entries found from {payload.from_date} to {payload.to_date}",
+            detail=(
+                f"No time entries found from "
+                f"{payload.from_date} to {payload.to_date}"
+            ),
         )
 
-    contracts = load_contracts()
-    projects, people, tasks, approvers = hydrate(time_entries)
+    projects, people, tasks, approvers, contracts = hydrate(time_entries)
 
     rows, errors = build_normalized_rows(
         time_entries=time_entries,
