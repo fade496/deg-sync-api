@@ -1,5 +1,4 @@
 import csv
-import math
 import os
 import re
 import tempfile
@@ -51,6 +50,7 @@ CSV_HEADERS = [
     "LABORHRS",
     "CRAFT+SKILL/PREM",
 ]
+
 
 DETAIL_HEADERS = [
     "Index",
@@ -243,6 +243,24 @@ def extract_id_digits(value: Any) -> str:
     return digits[0] if digits else clean_value(value)
 
 
+def extract_employee_id_from_roles(value: Any) -> str:
+    text = clean_value(value)
+
+    match = re.search(r"\bID-(\d+)\b", text, flags=re.IGNORECASE)
+    if match:
+        return match.group(1)
+
+    return ""
+
+
+def get_employee_id(person: Dict[str, Any]) -> str:
+    return (
+        clean_value(person.get("Employee ID"))
+        or extract_employee_id_from_roles(person.get("Harvest Roles"))
+        or clean_value(person.get("Harvest User ID"))
+    )
+
+
 def format_lem_date_name(rows: List[Dict[str, Any]]) -> str:
     dates = sorted(row["work_date"] for row in rows)
     start = dates[0]
@@ -432,7 +450,10 @@ def build_normalized_rows(
         invoice_type = clean_value(project.get("Invoice Type"))
 
         if not is_active:
-            errors.append(f"{record_id}: skipped inactive project {project_code or project_name}")
+            errors.append(
+                f"{record_id}: skipped inactive project "
+                f"{project_code or project_name}"
+            )
             continue
 
         if invoice_type.upper() != "LEM":
@@ -455,6 +476,8 @@ def build_normalized_rows(
             or clean_value(person.get("Full Name"))
         )
 
+        employee_id = get_employee_id(person)
+
         work_date = parse_date(fields.get("Spent Date"))
         hours = parse_hours(fields.get("Hours"))
 
@@ -463,11 +486,17 @@ def build_normalized_rows(
             continue
 
         if not contract:
-            errors.append(f"{record_id}: missing linked contract for project {project_code}")
+            errors.append(
+                f"{record_id}: missing linked contract for project {project_code}"
+            )
             continue
 
         if not employee_name:
             errors.append(f"{record_id}: missing employee name")
+            continue
+
+        if not employee_id:
+            errors.append(f"{record_id}: missing employee ID for {employee_name}")
             continue
 
         if work_date is None:
@@ -495,13 +524,13 @@ def build_normalized_rows(
             "approver_name": approver["name"],
             "approver_email": approver["email"],
             "employee_name": employee_name,
-            "employee_id": clean_value(person.get("Harvest User ID")),
+            "employee_id": employee_id,
             "work_date": work_date,
             "work_date_str": work_date.strftime("%m/%d/%y"),
             "hours": hours,
             "hours_str": format_hours(hours),
             "wo": wo,
-            "labor_code": extract_id_digits(person.get("Harvest User ID")),
+            "labor_code": extract_id_digits(employee_id),
             "craft_code": choose_craft_code(project.get("Billing Method"), person),
             "description": description,
             "report_name": "",
