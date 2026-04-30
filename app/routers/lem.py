@@ -1,4 +1,5 @@
 from pathlib import Path
+import shutil
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
@@ -10,6 +11,8 @@ from app.services.lem import generate_lem
 router = APIRouter(prefix="/lem", tags=["lem"])
 
 BASE_URL = "https://deg-sync-api-417046885785.northamerica-northeast1.run.app"
+LEM_OUTPUT_DIR = Path("/tmp/lem_outputs")
+LEM_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 @router.get("/ping")
@@ -19,9 +22,19 @@ def ping():
 
 @router.post("/generate")
 def generate(payload: LemGenerateRequest):
-    zip_path = generate_lem(payload)
-    zip_path = Path(zip_path)
-    zip_name = zip_path.name
+    temp_zip_path = Path(generate_lem(payload))
+
+    if not temp_zip_path.exists():
+        raise HTTPException(status_code=500, detail="LEM ZIP was not created")
+
+    zip_name = (
+        f"lem_{payload.from_date}_{payload.to_date}.zip"
+        .replace("/", "-")
+        .replace(":", "-")
+    )
+
+    final_zip_path = LEM_OUTPUT_DIR / zip_name
+    shutil.copyfile(temp_zip_path, final_zip_path)
 
     return {
         "status": "success",
@@ -36,10 +49,9 @@ def generate(payload: LemGenerateRequest):
 
 @router.get("/download/{filename}")
 def download_lem_file(filename: str):
-    output_dir = Path("outputs/lem").resolve()
-    file_path = (output_dir / filename).resolve()
+    file_path = (LEM_OUTPUT_DIR / filename).resolve()
 
-    if output_dir not in file_path.parents:
+    if LEM_OUTPUT_DIR.resolve() not in file_path.parents:
         raise HTTPException(status_code=400, detail="Invalid filename")
 
     if not file_path.exists():
