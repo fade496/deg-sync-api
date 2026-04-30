@@ -17,8 +17,12 @@ def ping():
 def generate(payload: LemGenerateRequest):
     zip_path = generate_lem(payload)
 
-    return FileResponse(
-        path=zip_path,
-        filename="lem_outputs.zip",
-        media_type="application/zip",
-    )
+    return {
+        "status": "success",
+        "filename": zip_name,
+        "download_url": f"/lem/download/{zip_name}",
+        "from_date": request.from_date,
+        "to_date": request.to_date,
+        "include_csv": request.include_csv,
+        "include_pdf": request.include_pdf
+    }
