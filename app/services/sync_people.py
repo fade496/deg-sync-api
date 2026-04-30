@@ -6,6 +6,28 @@ from app.clients.airtable import (
 )
 
 
+def format_roles(roles):
+    if not roles:
+        return ""
+
+    if isinstance(roles, list):
+        formatted_roles = []
+
+        for role in roles:
+            if isinstance(role, dict):
+                formatted_roles.append(
+                    role.get("name")
+                    or role.get("label")
+                    or str(role)
+                )
+            else:
+                formatted_roles.append(str(role))
+
+        return ", ".join(formatted_roles)
+
+    return str(roles)
+
+
 def sync_people():
     users = get_harvest_records("users", "users")
 
@@ -32,6 +54,8 @@ def sync_people():
             "Email": user.get("email") or "",
             "Telephone": user.get("telephone") or "",
             "Harvest User ID": harvest_user_id,
+            "Employee ID": user.get("employee_id") or "",
+            "Harvest Roles": format_roles(user.get("roles")),
             "Is Active": user.get("is_active"),
             "Is Contractor": user.get("is_contractor"),
             "Default Hourly Rate": user.get("default_hourly_rate"),
