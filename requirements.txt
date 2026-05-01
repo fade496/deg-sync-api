@@ -6,4 +6,4 @@ pandas
 openpyxl
 reportlab
 google-cloud-storage==2.16.0
-dropbox
+dropbox==11.36.2
