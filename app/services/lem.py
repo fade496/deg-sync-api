@@ -371,18 +371,9 @@ def choose_craft_code(
 ) -> str:
     method = normalize_billing_method(craft_selector)
 
-    craft1 = clean_value(
-        person.get("Description (from Craft1)")
-        or person.get("Craft1")
-    )
-    craft2 = clean_value(
-        person.get("Description (from Craft2)")
-        or person.get("Craft2")
-    )
-    craft3 = clean_value(
-        person.get("Description (from Craft3)")
-        or person.get("Craft3")
-    )
+    craft1 = clean_value(person.get("Craft1"))
+    craft2 = clean_value(person.get("Craft2"))
+    craft3 = clean_value(person.get("Craft3"))
 
     if method == "Craft 2":
         return craft2 or craft1
