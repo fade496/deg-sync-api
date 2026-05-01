@@ -16,8 +16,8 @@ def ping():
 @router.post("/generate")
 def generate(payload: LemGenerateRequest):
     """
-    Original working ZIP endpoint.
-    Use this for Swagger.
+    Swagger/manual endpoint.
+    Returns the ZIP file directly.
     """
     zip_path = generate_lem(payload)
 
@@ -31,15 +31,20 @@ def generate(payload: LemGenerateRequest):
 @router.post("/generate-json")
 def generate_json(payload: LemGenerateRequest):
     """
-    Chat-safe metadata endpoint.
-    Does not replace the working ZIP endpoint.
+    ChatGPT Action-safe endpoint.
+    Runs LEM generation but returns JSON instead of a binary ZIP.
     """
+    zip_path = generate_lem(payload)
+
     return {
         "status": "success",
-        "message": "Use /lem/generate for ZIP download.",
+        "message": "LEM outputs generated successfully.",
+        "filename": "lem_outputs.zip",
+        "zip_path": str(zip_path),
         "from_date": payload.from_date,
         "to_date": payload.to_date,
         "project_codes": payload.project_codes,
         "include_csv": payload.include_csv,
         "include_pdf": payload.include_pdf,
+        "note": "Use /lem/generate in Swagger to download the ZIP file.",
     }
