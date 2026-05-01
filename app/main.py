@@ -16,12 +16,14 @@ from app.routers import (
 )
 
 settings = get_settings()
+scope = f"api://{settings.ms_client_id}/access_as_admin"
 
 app = FastAPI(
     title="DEG Sync API",
     swagger_ui_init_oauth={
         "clientId": settings.ms_client_id,
         "usePkceWithAuthorizationCodeGrant": True,
+        "scopes": [scope],
     },
 )
 
@@ -58,16 +60,14 @@ def custom_openapi():
                         f"{settings.ms_tenant_id}/oauth2/v2.0/token"
                     ),
                     "scopes": {
-                        f"api://{settings.ms_client_id}/access_as_admin": (
-                            "Access DEG Sync API"
-                        )
+                        scope: "Access DEG Sync API",
                     },
                 }
             },
         }
     }
 
-    openapi_schema["security"] = [{"OAuth2": []}]
+    openapi_schema["security"] = [{"OAuth2": [scope]}]
 
     app.openapi_schema = openapi_schema
     return app.openapi_schema
