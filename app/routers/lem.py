@@ -3,6 +3,7 @@ from fastapi.responses import FileResponse
 
 from app.models.lem_requests import LemGenerateRequest
 from app.services.lem import generate_lem
+from app.services.storage import upload_zip_and_create_signed_url
 
 
 router = APIRouter(prefix="/lem", tags=["lem"])
@@ -30,13 +31,19 @@ def generate(payload: LemGenerateRequest):
 
 @router.post("/generate-json")
 def generate_json(payload: LemGenerateRequest):
+    """
+    ChatGPT Action-safe endpoint.
+    Generates LEM ZIP, uploads it to storage, and returns a signed download URL.
+    """
     try:
-        generate_lem(payload)
+        zip_path = generate_lem(payload)
+        download_url = upload_zip_and_create_signed_url(zip_path)
 
         return {
             "status": "success",
             "message": "LEM outputs generated successfully.",
             "filename": "lem_outputs.zip",
+            "download_url": download_url,
             "from_date": str(payload.from_date),
             "to_date": str(payload.to_date),
             "project_codes": payload.project_codes,
