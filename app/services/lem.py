@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import landscape, letter
 from reportlab.lib.units import inch
+from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.platypus import (
     BaseDocTemplate,
     Frame,
@@ -27,6 +28,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID", "appoW4AxlO3Gkezr4")
 AIRTABLE_API_ROOT = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}"
 
+
 TABLES = {
     "time_entries": "tblHStBhBeiBKAyDi",
     "projects": "tblDSMSWBOtotSwEX",
@@ -35,6 +37,7 @@ TABLES = {
     "contracts": "tblSOm11yRrU6gckp",
     "contacts": "tblk1KQFBKDA1WPna",
 }
+
 
 CSV_HEADERS = [
     "LINETYPE",
@@ -47,6 +50,7 @@ CSV_HEADERS = [
     "LABORHRS",
     "CRAFT+SKILL/PREM",
 ]
+
 
 DETAIL_HEADERS = [
     "Index",
@@ -534,10 +538,10 @@ def build_normalized_rows(
 
     rows.sort(
         key=lambda row: (
-            row["approver_name"].lower(),
+            row["contract"],
+            row["approver_name"],
             row["work_date"],
-            row["employee_name"].lower(),
-            row["project_code"],
+            row["employee_name"],
         )
     )
 
@@ -552,15 +556,6 @@ def write_contract_csv(
     contract_rows: List[Dict[str, Any]],
     output_dir: Path,
 ) -> Path:
-    contract_rows = sorted(
-        contract_rows,
-        key=lambda row: (
-            row["approver_name"].lower(),
-            row["work_date"],
-            row["employee_name"].lower(),
-        ),
-    )
-
     base_name = format_lem_date_name(contract_rows)
     contract = contract_rows[0]["contract"]
     csv_path = output_dir / f"{safe_filename(base_name)}.csv"
@@ -602,19 +597,7 @@ def create_pdf_reports(
 
     pdf_paths: List[Path] = []
 
-    for (_, approver_name), group in sorted(
-        grouped.items(),
-        key=lambda item: item[0][1].lower(),
-    ):
-        group = sorted(
-            group,
-            key=lambda row: (
-                row["approver_name"].lower(),
-                row["work_date"],
-                row["employee_name"].lower(),
-            ),
-        )
-
+    for (_, approver_name), group in grouped.items():
         base_name = format_lem_date_name(group)
         safe_approver = safe_filename(approver_name)
         report_name = f"{base_name}.{safe_approver}"
@@ -640,8 +623,8 @@ def build_report_pdf(rows: List[Dict[str, Any]], output_path: Path) -> None:
     usable_width = page_width - left - right
     usable_height = page_height - top - bottom
 
-    header_h = 1.20 * inch
-    signature_h = 0.70 * inch
+    header_h = 1.10 * inch
+    signature_h = 0.65 * inch
     table_h = usable_height - header_h - signature_h - 0.08 * inch
 
     doc = BaseDocTemplate(
@@ -680,9 +663,8 @@ def build_report_pdf(rows: List[Dict[str, Any]], output_path: Path) -> None:
         "body",
         parent=styles["BodyText"],
         fontName="Helvetica",
-        fontSize=7,
-        leading=8,
-        wordWrap="CJK",
+        fontSize=8,
+        leading=10,
     )
 
     data: List[List[Any]] = [DETAIL_HEADERS]
@@ -691,38 +673,30 @@ def build_report_pdf(rows: List[Dict[str, Any]], output_path: Path) -> None:
         data.append([
             str(idx),
             row["work_date"].strftime("%m/%d/%Y"),
-            Paragraph(escape_pdf(row["report_name"]), body),
-            Paragraph(escape_pdf(row["employee_name"]), body),
-            Paragraph(escape_pdf(row["project_name"]), body),
+            row["report_name"],
+            row["employee_name"],
+            row["project_name"],
             Paragraph(escape_pdf(row["description"]), body),
             row["hours_str"],
             row["wo"],
         ])
 
-    col_widths = [
-        usable_width * 0.05,
-        usable_width * 0.09,
-        usable_width * 0.18,
-        usable_width * 0.14,
-        usable_width * 0.18,
-        usable_width * 0.25,
-        usable_width * 0.05,
-        usable_width * 0.06,
-    ]
+    col_widths = fit_column_widths(data, usable_width, styles)
 
     table = Table(data, colWidths=col_widths, repeatRows=1)
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#D9D9D9")),
         ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("FONTSIZE", (0, 0), (-1, -1), 7),
-        ("LEADING", (0, 0), (-1, -1), 8),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("LEADING", (0, 0), (-1, -1), 10),
         ("ALIGN", (0, 0), (0, -1), "CENTER"),
+        ("ALIGN", (1, 1), (2, -1), "LEFT"),
         ("ALIGN", (6, 1), (7, -1), "RIGHT"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 3),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
-        ("TOPPADDING", (0, 0), (-1, -1), 2),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
     ]))
 
     doc.build([table])
@@ -747,73 +721,45 @@ def draw_pdf_page_decor(
     report_name = rows[0]["report_name"]
     client = rows[0]["contract"]
     approver = rows[0]["approver_name"]
-    date_range = f"{rows[0]['work_date']:%m/%d/%Y} - {rows[-1]['work_date']:%m/%d/%Y}"
 
-    header_top = top_y + 6
+    canvas.setFont("Helvetica-Bold", 16)
+    canvas.drawString(left, top_y + 2, "DEG engineering")
 
-    canvas.setFillColor(colors.HexColor("#1F4E78"))
-    canvas.rect(left, header_top - 30, usable_width, 30, fill=1, stroke=0)
-
-    canvas.setFillColor(colors.white)
-    canvas.setFont("Helvetica-Bold", 15)
-    canvas.drawString(left + 10, header_top - 20, "DEG Engineering — LEM Approval Report")
-
-    canvas.setFont("Helvetica", 8)
-    canvas.drawRightString(
-        left + usable_width - 10,
-        header_top - 20,
-        f"Generated {datetime.now().strftime('%m/%d/%Y')}",
-    )
-
-    box_top = header_top - 42
+    box_top = top_y - 14
     row_h = 18
-    label_w = 90
-    gap = 12
-    col_w = (usable_width - gap) / 2
-    value_w = col_w - label_w
+    label_w = 86
+    value_w = usable_width / 2 - label_w - 6
 
-    canvas.setStrokeColor(colors.HexColor("#9E9E9E"))
-    canvas.setLineWidth(0.5)
+    x1 = left
+    x2 = left + usable_width / 2
 
     labels1 = [
-        ("Client", client),
-        ("Project", project_label),
-        ("Approver", approver),
+        ("Client:", client),
+        ("Project:", project_label),
+        ("Date Generated:", datetime.now().strftime("%m/%d/%Y")),
     ]
 
     labels2 = [
-        ("Report Name", report_name),
-        ("Date Range", date_range),
-        ("Total Hours", format_hours(total_hours)),
+        ("Report Name:", report_name),
+        ("Report Approver:", approver),
+        ("Total Hours:", format_hours(total_hours)),
     ]
-
-    x1 = left
-    x2 = left + col_w + gap
 
     for i, (label, value) in enumerate(labels1):
         y = box_top - i * row_h
-        draw_header_cell(canvas, x1, y, label_w, row_h, label, is_label=True)
+        draw_header_cell(canvas, x1, y, label_w, row_h, label, bold=True)
         draw_header_cell(canvas, x1 + label_w, y, value_w, row_h, value)
 
     for i, (label, value) in enumerate(labels2):
         y = box_top - i * row_h
-        draw_header_cell(canvas, x2, y, label_w, row_h, label, is_label=True)
+        draw_header_cell(canvas, x2, y, label_w, row_h, label, bold=True)
         draw_header_cell(canvas, x2 + label_w, y, value_w, row_h, value)
 
-    footer_y = bottom + 18
-    canvas.setFillColor(colors.black)
-    canvas.setStrokeColor(colors.black)
-    canvas.setLineWidth(0.75)
-
-    sig_x = left + 80
-    date_x = left + usable_width * 0.72 + 42
+    footer_y = bottom + 16
 
     canvas.setFont("Helvetica-Bold", 9)
-    canvas.drawString(left, footer_y + 12, "Signature:")
-    canvas.line(sig_x, footer_y + 10, left + usable_width * 0.62, footer_y + 10)
-
-    canvas.drawString(left + usable_width * 0.72, footer_y + 12, "Date:")
-    canvas.line(date_x, footer_y + 10, left + usable_width, footer_y + 10)
+    canvas.drawString(left + 18, footer_y + 18, "Signature:")
+    canvas.drawString(left + usable_width * 0.72, footer_y + 18, "Date:")
 
 
 def draw_header_cell(
@@ -823,25 +769,53 @@ def draw_header_cell(
     w: float,
     h: float,
     text: str,
-    is_label: bool = False,
+    bold: bool = False,
 ) -> None:
-    if is_label:
-        canvas.setFillColor(colors.HexColor("#E7EEF5"))
-        canvas.rect(x, y - h, w, h, fill=1, stroke=1)
-        canvas.setFillColor(colors.HexColor("#1F4E78"))
-        canvas.setFont("Helvetica-Bold", 8)
-    else:
-        canvas.setFillColor(colors.white)
-        canvas.rect(x, y - h, w, h, fill=1, stroke=1)
-        canvas.setFillColor(colors.black)
-        canvas.setFont("Helvetica", 8)
+    canvas.setFont("Helvetica-Bold" if bold else "Helvetica", 8)
+    canvas.drawString(x + 4, y - 12, str(text))
 
-    value = str(text or "")
-    max_chars = max(10, int(w / 4.2))
-    if len(value) > max_chars:
-        value = value[: max_chars - 3] + "..."
 
-    canvas.drawString(x + 5, y - 12, value)
+def fit_column_widths(
+    data: List[List[Any]],
+    total_width: float,
+    styles,
+) -> List[float]:
+    raw_widths = []
+
+    for col_idx in range(len(DETAIL_HEADERS)):
+        max_width = (
+            stringWidth(str(DETAIL_HEADERS[col_idx]), "Helvetica-Bold", 8)
+            + 12
+        )
+
+        for row in data[1:]:
+            value = row[col_idx]
+
+            if isinstance(value, Paragraph):
+                width = 180
+            else:
+                width = stringWidth(str(value), "Helvetica", 8) + 10
+
+            max_width = max(max_width, width)
+
+        raw_widths.append(max_width)
+
+    scale = total_width / sum(raw_widths)
+    widths = [width * scale for width in raw_widths]
+
+    min_widths = [28, 54, 75, 90, 110, 170, 42, 52]
+    widths = [
+        max(widths[index], min_widths[index])
+        for index in range(len(widths))
+    ]
+
+    total = sum(widths)
+
+    if total > total_width:
+        overflow = total - total_width
+        widths[5] = max(min_widths[5], widths[5] - overflow)
+
+    return widths
 
 
 def escape_pdf(value: str) -> str:
