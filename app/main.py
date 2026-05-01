@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 
+from app.core.config import get_settings
 from app.routers import lem
 from app.routers import (
     oauth,
@@ -14,11 +15,12 @@ from app.routers import (
     scheduler,
 )
 
+settings = get_settings()
+
 app = FastAPI(
     title="DEG Sync API",
     swagger_ui_init_oauth={
-        # Replace with your OAuth client ID
-        "clientId": "YOUR_CLIENT_ID",
+        "clientId": settings.ms_client_id,
         "usePkceWithAuthorizationCodeGrant": True,
     },
 )
@@ -41,21 +43,30 @@ def custom_openapi():
     )
 
     openapi_schema.setdefault("components", {})
+
     openapi_schema["components"]["securitySchemes"] = {
         "OAuth2": {
             "type": "oauth2",
             "flows": {
                 "authorizationCode": {
-                    # Replace these with your actual OAuth endpoints
-                    "authorizationUrl": "YOUR_AUTHORIZATION_URL",
-                    "tokenUrl": "YOUR_TOKEN_URL",
-                    "scopes": {},
+                    "authorizationUrl": (
+                        f"https://login.microsoftonline.com/"
+                        f"{settings.ms_tenant_id}/oauth2/v2.0/authorize"
+                    ),
+                    "tokenUrl": (
+                        f"https://login.microsoftonline.com/"
+                        f"{settings.ms_tenant_id}/oauth2/v2.0/token"
+                    ),
+                    "scopes": {
+                        f"api://{settings.ms_client_id}/access_as_admin": (
+                            "Access DEG Sync API"
+                        )
+                    },
                 }
             },
         }
     }
 
-    # Apply OAuth globally in Swagger
     openapi_schema["security"] = [{"OAuth2": []}]
 
     app.openapi_schema = openapi_schema
