@@ -1,6 +1,5 @@
 import os
 
-DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
 DROPBOX_LEM_ROOT = "/DEG Dropbox/98 - Exec Files/01 - Lems/-- DEG LEMS/AI"
 
 
@@ -13,10 +12,22 @@ def upload_zip_and_create_shared_link(
     from dropbox.files import WriteMode
     from dropbox.sharing import RequestedVisibility
 
-    if not DROPBOX_ACCESS_TOKEN:
-        raise ValueError("DROPBOX_ACCESS_TOKEN is not set")
+    app_key = os.getenv("DROPBOX_APP_KEY")
+    app_secret = os.getenv("DROPBOX_APP_SECRET")
+    refresh_token = os.getenv("DROPBOX_REFRESH_TOKEN")
 
-    dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+    if not app_key:
+        raise ValueError("DROPBOX_APP_KEY is not set")
+    if not app_secret:
+        raise ValueError("DROPBOX_APP_SECRET is not set")
+    if not refresh_token:
+        raise ValueError("DROPBOX_REFRESH_TOKEN is not set")
+
+    dbx = dropbox.Dropbox(
+        app_key=app_key,
+        app_secret=app_secret,
+        oauth2_refresh_token=refresh_token,
+    )
 
     filename = os.path.basename(zip_path)
     run_folder = f"{from_date}_to_{to_date}"
