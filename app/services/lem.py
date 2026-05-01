@@ -295,12 +295,14 @@ def hydrate(
     Dict[str, Dict[str, Any]],
     Dict[str, Dict[str, Any]],
     Dict[str, Dict[str, Any]],
+    Dict[str, Dict[str, Any]],
 ]:
     project_ids = set()
     person_ids = set()
     task_ids = set()
     approver_ids = set()
     contract_ids = set()
+    craft_ids = set()
 
     for record in time_entries:
         fields = record.get("fields", {})
@@ -316,11 +318,18 @@ def hydrate(
         contract_ids.add(first_link(project.get("Contracts")))
 
     people = airtable_get_by_ids(TABLES["people"], list(person_ids))
+
+    for person in people.values():
+        craft_ids.add(first_link(person.get("Craft1")))
+        craft_ids.add(first_link(person.get("Craft2")))
+        craft_ids.add(first_link(person.get("Craft3")))
+
     tasks = airtable_get_by_ids(TABLES["tasks"], list(task_ids))
     approvers = airtable_get_by_ids(TABLES["contacts"], list(approver_ids))
     contracts = airtable_get_by_ids(TABLES["contracts"], list(contract_ids))
+    craft_codes = airtable_get_by_ids(TABLES["craft_codes"], list(craft_ids))
 
-    return projects, people, tasks, approvers, contracts
+    return projects, people, tasks, approvers, contracts, craft_codes
 
 
 # =============================================================================
@@ -365,16 +374,27 @@ def normalize_billing_method(value: Any) -> str:
 
     return "Craft 1"
 
+def get_craft_value(
+    value: Any,
+    craft_codes: Dict[str, Dict[str, Any]],
+) -> str:
+    craft_id = first_link(value)
+
+    if craft_id and craft_id in craft_codes:
+        return clean_value(craft_codes[craft_id].get("Craft"))
+
+    return clean_value(value)
 
 def choose_craft_code(
     craft_selector: Any,
     person: Dict[str, Any],
+    craft_codes: Dict[str, Dict[str, Any]],
 ) -> str:
     method = normalize_billing_method(craft_selector)
 
-    craft1 = clean_value(person.get("Craft1"))
-    craft2 = clean_value(person.get("Craft2"))
-    craft3 = clean_value(person.get("Craft3"))
+    craft1 = get_craft_value(person.get("Craft1"), craft_codes)
+    craft2 = get_craft_value(person.get("Craft2"), craft_codes)
+    craft3 = get_craft_value(person.get("Craft3"), craft_codes)
 
     if method == "Craft 2":
         return craft2 or craft1
@@ -383,7 +403,6 @@ def choose_craft_code(
         return craft3 or craft1
 
     return craft1
-
 
 def get_approver(
     project: Dict[str, Any],
@@ -429,7 +448,9 @@ def build_normalized_rows(
     tasks: Dict[str, Dict[str, Any]],
     approvers: Dict[str, Dict[str, Any]],
     contracts: Dict[str, Dict[str, Any]],
+    craft_codes: Dict[str, Dict[str, Any]],
 ) -> tuple[List[Dict[str, Any]], List[str]]:
+    
     rows: List[Dict[str, Any]] = []
     errors: List[str] = []
 
@@ -536,7 +557,7 @@ def build_normalized_rows(
             "hours_str": format_hours(hours),
             "wo": wo,
             "labor_code": extract_id_digits(employee_id),
-            "craft_code": choose_craft_code(project.get("Craft"), person),
+            "craft_code": choose_craft_code(project.get("Craft"), person, craft_codes),
             "description": description,
             "report_name": "",
         })
@@ -907,7 +928,7 @@ def generate_lem(payload) -> str:
             ),
         )
 
-    projects, people, tasks, approvers, contracts = hydrate(time_entries)
+    projects, people, tasks, approvers, contracts, craft_codes = hydrate(time_entries)
 
     rows, errors = build_normalized_rows(
         time_entries=time_entries,
@@ -916,6 +937,7 @@ def generate_lem(payload) -> str:
         tasks=tasks,
         approvers=approvers,
         contracts=contracts,
+        craft_codes=craft_codes,
     )
 
     if not rows:
