@@ -34,6 +34,7 @@ TABLES = {
     "tasks": "tblrzzJqP5fNH2lOn",
     "contracts": "tblSOm11yRrU6gckp",
     "contacts": "tblk1KQFBKDA1WPna",
+    "craft_codes": "tblgmdvbGKnCw1Mfw",
 }
 
 CSV_HEADERS = [
