@@ -338,22 +338,38 @@ def get_contract_for_project(
 
 
 def normalize_billing_method(value: Any) -> str:
-    text = clean_value(value).lower()
+    """
+    Normalizes the Projects.Craft field.
 
-    if "craft code 2" in text or text == "craft 2":
+    Supports:
+    - Craft 1, Craft1, Craft Code 1, 1
+    - Craft 2, Craft2, Craft Code 2, 2
+    - Craft 3, Craft3, Craft Code 3, 3
+
+    Blank or unknown values default to Craft 1.
+    """
+    text = clean_value(value).lower().strip()
+    text_compact = (
+        text
+        .replace(" ", "")
+        .replace("-", "")
+        .replace("_", "")
+    )
+
+    if text_compact in ("craft2", "craftcode2", "code2", "2"):
         return "Craft 2"
 
-    if "craft code 3" in text or text == "craft 3":
+    if text_compact in ("craft3", "craftcode3", "code3", "3"):
         return "Craft 3"
 
     return "Craft 1"
 
 
 def choose_craft_code(
-    billing_method: Any,
+    craft_selector: Any,
     person: Dict[str, Any],
 ) -> str:
-    method = normalize_billing_method(billing_method)
+    method = normalize_billing_method(craft_selector)
 
     craft1 = clean_value(
         person.get("Description (from Craft1)")
@@ -515,6 +531,7 @@ def build_normalized_rows(
             "project_code": project_code,
             "project_name": project_name,
             "billing_method": clean_value(project.get("Billing Method")),
+            "craft_selector": clean_value(project.get("Craft")),
             "approver_first": approver["first"],
             "approver_last": approver["last"],
             "approver_name": approver["name"],
