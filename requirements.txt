@@ -5,3 +5,4 @@ python-jose[cryptography]
 pandas
 openpyxl
 reportlab
+google-cloud-storage
