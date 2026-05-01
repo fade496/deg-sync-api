@@ -527,7 +527,7 @@ def build_normalized_rows(
             "hours_str": format_hours(hours),
             "wo": wo,
             "labor_code": extract_id_digits(employee_id),
-            "craft_code": choose_craft_code(project.get("Billing Method"), person),
+            "craft_code": choose_craft_code(project.get("Craft"), person),
             "description": description,
             "report_name": "",
         })
