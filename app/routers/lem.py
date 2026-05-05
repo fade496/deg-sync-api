@@ -1,7 +1,6 @@
 from fastapi import APIRouter
 from fastapi.responses import FileResponse
 
-from app.core.auth import check_key
 from app.models.lem_requests import LemGenerateRequest
 from app.services.lem import generate_lem
 from app.services.dropbox_storage import upload_zip_and_create_shared_link
@@ -10,7 +9,9 @@ from app.services.dropbox_storage import upload_zip_and_create_shared_link
 router = APIRouter(prefix="/lem", tags=["lem"])
 
 
-@router.get("/ping") def ping(): return {"lem": "ok"}
+@router.get("/ping")
+def ping():
+    return {"lem": "ok"}
 
 
 @router.post("/generate")
