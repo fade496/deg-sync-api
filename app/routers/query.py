@@ -13,7 +13,7 @@ def query(
     x_api_key: str = Header(None),
     authorization: str = Header(None),
 ):
-    check_key(x_api_key=x_api_key, authorization=authorization)
+    #check_key(x_api_key=x_api_key, authorization=authorization)
 
     records = get_airtable_records(payload.table)
 
