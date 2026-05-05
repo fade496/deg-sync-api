@@ -10,13 +10,7 @@ from app.services.dropbox_storage import upload_zip_and_create_shared_link
 router = APIRouter(prefix="/lem", tags=["lem"])
 
 
-@router.get("/ping")
-def ping(
-    x_api_key: str = Header(None),
-    authorization: str = Header(None),
-):
-    check_key(x_api_key=x_api_key, authorization=authorization)
-    return {"lem": "ok"}
+@router.get("/ping") def ping(): return {"lem": "ok"}
 
 
 @router.post("/generate")
