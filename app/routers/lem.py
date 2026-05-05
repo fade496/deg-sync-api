@@ -10,7 +10,11 @@ router = APIRouter(prefix="/lem", tags=["lem"])
 
 
 @router.get("/ping")
-def ping():
+def ping(
+    x_api_key: str = Header(None),
+    authorization: str = Header(None),
+):
+    check_key(x_api_key=x_api_key, authorization=authorization)
     return {"lem": "ok"}
 
 
