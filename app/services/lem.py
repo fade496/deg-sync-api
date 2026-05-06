@@ -552,7 +552,7 @@ def build_normalized_rows(
             "employee_name": employee_name,
             "employee_id": employee_id,
             "work_date": work_date,
-            "work_date_str": work_date.strftime("%m/%d/%y"),
+            "work_date_str": work_date.strftime("%m/%d/%Y"),
             "hours": hours,
             "hours_str": format_hours(hours),
             "wo": wo,
