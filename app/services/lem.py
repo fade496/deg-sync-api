@@ -258,10 +258,32 @@ def get_employee_id(person: Dict[str, Any]) -> str:
     )
 
 
-def format_lem_date_name(rows: List[Dict[str, Any]]) -> str:
-    dates = sorted(row["work_date"] for row in rows)
-    start = dates[0]
-    end = dates[-1]
+def format_lem_date_name(
+    rows: List[Dict[str, Any]],
+    from_date: str,
+    to_date: str,
+) -> str:
+    """
+    Formats the LEM/report name from the requested LEM date range,
+    not from the dates present in the filtered rows.
+
+    Example:
+    from_date=2026-04-14, to_date=2026-05-05, short_code=ALB
+    returns 04.14-05.05.2026.ALB
+    """
+    start = parse_date(from_date)
+    end = parse_date(to_date)
+
+    if start is None or end is None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Invalid LEM date range",
+                "from_date": from_date,
+                "to_date": to_date,
+            },
+        )
+
     short_code = rows[0].get("short_code") or "LEM"
 
     if start.month == end.month:
@@ -270,6 +292,16 @@ def format_lem_date_name(rows: List[Dict[str, Any]]) -> str:
         date_part = f"{start:%m.%d}-{end:%m.%d.%Y}"
 
     return f"{date_part}.{short_code}"
+
+
+def format_display_date_range(from_date: str, to_date: str) -> str:
+    start = parse_date(from_date)
+    end = parse_date(to_date)
+
+    if start is None or end is None:
+        return f"{from_date} - {to_date}"
+
+    return f"{start:%m/%d/%Y} - {end:%m/%d/%Y}"
 
 
 # =============================================================================
@@ -374,6 +406,7 @@ def normalize_billing_method(value: Any) -> str:
 
     return "Craft 1"
 
+
 def get_craft_value(
     value: Any,
     craft_codes: Dict[str, Dict[str, Any]],
@@ -393,9 +426,11 @@ def get_craft_value(
             clean_value(craft.get("Position"))
             or clean_value(craft.get("Role"))
             or clean_value(craft.get("Craft 2"))
+            or clean_value(craft.get("Craft"))
         )
 
     return direct_value
+
 
 def choose_craft_code(
     craft_selector: Any,
@@ -415,6 +450,7 @@ def choose_craft_code(
         return craft3 or craft1
 
     return craft1
+
 
 def get_approver(
     project: Dict[str, Any],
@@ -462,7 +498,6 @@ def build_normalized_rows(
     contracts: Dict[str, Dict[str, Any]],
     craft_codes: Dict[str, Dict[str, Any]],
 ) -> tuple[List[Dict[str, Any]], List[str]]:
-    
     rows: List[Dict[str, Any]] = []
     errors: List[str] = []
 
@@ -572,6 +607,7 @@ def build_normalized_rows(
             "craft_code": choose_craft_code(project.get("Craft"), person, craft_codes),
             "description": description,
             "report_name": "",
+            "lem_date_range": "",
         })
 
     rows.sort(
@@ -593,6 +629,8 @@ def build_normalized_rows(
 def write_contract_csv(
     contract_rows: List[Dict[str, Any]],
     output_dir: Path,
+    from_date: str,
+    to_date: str,
 ) -> Path:
     contract_rows = sorted(
         contract_rows,
@@ -603,7 +641,7 @@ def write_contract_csv(
         ),
     )
 
-    base_name = format_lem_date_name(contract_rows)
+    base_name = format_lem_date_name(contract_rows, from_date, to_date)
     contract = contract_rows[0]["contract"]
     csv_path = output_dir / f"{safe_filename(base_name)}.csv"
 
@@ -636,6 +674,8 @@ def write_contract_csv(
 def create_pdf_reports(
     rows: List[Dict[str, Any]],
     output_dir: Path,
+    from_date: str,
+    to_date: str,
 ) -> List[Path]:
     grouped: Dict[tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
 
@@ -643,6 +683,7 @@ def create_pdf_reports(
         grouped[(row["contract"], row["approver_name"])].append(row)
 
     pdf_paths: List[Path] = []
+    display_date_range = format_display_date_range(from_date, to_date)
 
     for (_, approver_name), group in sorted(
         grouped.items(),
@@ -657,12 +698,13 @@ def create_pdf_reports(
             ),
         )
 
-        base_name = format_lem_date_name(group)
+        base_name = format_lem_date_name(group, from_date, to_date)
         safe_approver = safe_filename(approver_name)
         report_name = f"{base_name}.{safe_approver}"
 
         for row in group:
             row["report_name"] = report_name
+            row["lem_date_range"] = display_date_range
 
         pdf_path = output_dir / f"{safe_filename(report_name)}.pdf"
         build_report_pdf(group, pdf_path)
@@ -789,7 +831,9 @@ def draw_pdf_page_decor(
     report_name = rows[0]["report_name"]
     client = rows[0]["contract"]
     approver = rows[0]["approver_name"]
-    date_range = f"{rows[0]['work_date']:%m/%d/%Y} - {rows[-1]['work_date']:%m/%d/%Y}"
+    date_range = rows[0].get("lem_date_range") or (
+        f"{rows[0]['work_date']:%m/%d/%Y} - {rows[-1]['work_date']:%m/%d/%Y}"
+    )
 
     header_top = top_y + 6
 
@@ -967,9 +1011,19 @@ def generate_lem(payload) -> str:
         grouped_by_contract[row["contract"]].append(row)
 
     for contract_rows in grouped_by_contract.values():
-        write_contract_csv(contract_rows, output_dir)
+        write_contract_csv(
+            contract_rows,
+            output_dir,
+            payload.from_date,
+            payload.to_date,
+        )
 
-    create_pdf_reports(rows, output_dir)
+    create_pdf_reports(
+        rows,
+        output_dir,
+        payload.from_date,
+        payload.to_date,
+    )
     write_errors(errors, output_dir)
 
     return str(zip_output_dir(output_dir))
