@@ -378,12 +378,24 @@ def get_craft_value(
     value: Any,
     craft_codes: Dict[str, Dict[str, Any]],
 ) -> str:
+    direct_value = clean_value(value)
+
+    # If Airtable already returned the display value from People.Craft1/2/3,
+    # use it directly.
+    if direct_value and not direct_value.startswith("rec"):
+        return direct_value
+
     craft_id = first_link(value)
 
     if craft_id and craft_id in craft_codes:
-        return clean_value(craft_codes[craft_id].get("Craft"))
+        craft = craft_codes[craft_id]
+        return (
+            clean_value(craft.get("Position"))
+            or clean_value(craft.get("Role"))
+            or clean_value(craft.get("Craft 2"))
+        )
 
-    return clean_value(value)
+    return direct_value
 
 def choose_craft_code(
     craft_selector: Any,
